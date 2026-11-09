@@ -1,0 +1,15 @@
+{
+  "project_name": "JustMeMedia ContentOS",
+  "schema_version": "0.1.0",
+  "brand": "JustMeMedia",
+  "timezone": "America/Toronto",
+  "primary_hosts": [
+    "Windows ThinkCentre",
+    "MacBook Pro"
+  ],
+  "storage_mode": "local_first_with_encrypted_external_backup",
+  "database_mode": "one_local_sqlite_database_per_host",
+  "cloud_providers_optional": true,
+  "publishing_requires_explicit_approval": true,
+  "sync_strategy": "not_yet_selected"
+}

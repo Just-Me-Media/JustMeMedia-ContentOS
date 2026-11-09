@@ -1,0 +1,35 @@
+{
+  "default_mode": "local",
+  "providers": [
+    {
+      "id": "ollama-thinkcentre",
+      "type": "ollama",
+      "enabled": false,
+      "base_url_env": "CONTENTOS_OLLAMA_THINKCENTRE_URL"
+    },
+    {
+      "id": "ollama-mac",
+      "type": "ollama",
+      "enabled": false,
+      "base_url_env": "CONTENTOS_OLLAMA_MAC_URL"
+    },
+    {
+      "id": "openai-compatible",
+      "type": "openai_compatible",
+      "enabled": false,
+      "base_url_env": "CONTENTOS_API_BASE_URL",
+      "api_key_env": "CONTENTOS_API_KEY"
+    },
+    {
+      "id": "anthropic",
+      "type": "anthropic",
+      "enabled": false,
+      "api_key_env": "ANTHROPIC_API_KEY"
+    }
+  ],
+  "notes": [
+    "This is a template only; no endpoints or secrets are configured.",
+    "Prefer OS credential stores or environment variables for secrets.",
+    "Do not commit real credentials."
+  ]
+}
