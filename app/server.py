@@ -661,31 +661,58 @@ def call_ai(provider_id: str, prompt: str, system_prompt: str = "") -> str:
 
 
 class CleanTextExtractor(HTMLParser):
-    def __init__(self):
+    def __init__(self, base_url: str = ""):
         super().__init__()
+        self.base_url = base_url
         self.texts = []
+        self.links = []
+        self.curr_link = None
         self.skip = False
 
     def handle_starttag(self, tag, attrs):
-        if tag.lower() in ("script", "style", "nav", "footer", "header", "noscript", "svg", "aside"):
+        t = tag.lower()
+        if t in ("script", "style", "nav", "footer", "header", "noscript", "svg", "aside"):
             self.skip = True
+        elif t == "a" and not self.skip:
+            attr_dict = dict(attrs)
+            href = attr_dict.get("href", "").strip()
+            if href and not href.startswith(("#", "javascript:", "mailto:", "tel:")):
+                full_url = urllib.parse.urljoin(self.base_url, href) if self.base_url else href
+                self.curr_link = {"href": full_url, "text": ""}
 
     def handle_endtag(self, tag):
-        if tag.lower() in ("script", "style", "nav", "footer", "header", "noscript", "svg", "aside"):
+        t = tag.lower()
+        if t in ("script", "style", "nav", "footer", "header", "noscript", "svg", "aside"):
             self.skip = False
+        elif t == "a" and self.curr_link:
+            text = self.curr_link["text"].strip()
+            href = self.curr_link["href"]
+            # Filter out social share icons, terms, privacy, cookie noise
+            ignore_keywords = ("privacy", "terms", "cookie", "wechat", "bilibili", "youtube", "linkedin.com/showcase", "agreements", "guidelines", "sign in", "login")
+            if len(text) >= 3 and not any(k in text.lower() or k in href.lower() for k in ignore_keywords):
+                if not any(l["href"] == href for l in self.links):
+                    self.links.append({"text": text, "href": href})
+            self.curr_link = None
 
     def handle_data(self, data):
         if not self.skip:
             s = data.strip()
-            if len(s) > 25:
+            if len(s) > 20:
                 self.texts.append(s)
+            if self.curr_link is not None and s:
+                self.curr_link["text"] = (self.curr_link["text"] + " " + s).strip()
 
     def get_text(self) -> str:
-        return "\n\n".join(self.texts)
+        body = "\n\n".join(self.texts)
+        if self.links:
+            # Curate top actionable resource links (apply, learn more, docs)
+            link_lines = [f"• {l['text']}: {l['href']}" for l in self.links[:4]]
+            body += "\n\nActionable Resource & Application Links Found in Source:\n" + "\n".join(link_lines)
+        return body
 
 
 def extract_article_text(url: str, max_chars: int = 4000) -> str:
-    """Zero-dependency scraper: fetches full article text from webpage."""
+    """Zero-dependency scraper: fetches full article text and actionable links."""
     if not url or not url.startswith("http"):
         return ""
     try:
@@ -697,7 +724,7 @@ def extract_article_text(url: str, max_chars: int = 4000) -> str:
             raw = resp.read(300_000)
             encoding = resp.headers.get_content_charset() or "utf-8"
             html_text = raw.decode(encoding, errors="replace")
-        parser = CleanTextExtractor()
+        parser = CleanTextExtractor(base_url=url)
         parser.feed(html_text)
         text = parser.get_text()
         return text[:max_chars] if text else ""
@@ -705,7 +732,7 @@ def extract_article_text(url: str, max_chars: int = 4000) -> str:
         return f"(Could not scrape full article body: {exc})"
 
 
-def run_roundtable(provider_id: str, title: str, context: str, platform: str, tone: str = "thought_leadership") -> dict:
+def run_roundtable(provider_id: str, title: str, context: str, platform: str, tone: str = "thought_leadership", source_url: str = "") -> dict:
     """3-Agent Consensus Pipeline: Drafter -> Fact-Checker -> Hook/Format Optimizer -> Art Director."""
     tone_directives = {
         "thought_leadership": "Style: Authoritative, strategic, data-informed industry insights. Highlight future implications.",
@@ -724,6 +751,12 @@ def run_roundtable(provider_id: str, title: str, context: str, platform: str, to
         f"Draft an engaging, high-signal post for {platform}.\n"
         f"Topic: {title}\n"
         f"Verified facts & source text: {context}\n"
+        f"Source URL: {source_url}\n\n"
+        f"MANDATORY RESOURCE & APPLICATION LINK:\n"
+        f"Always provide an actionable link near the end of the post so readers can learn more, read documentation, or apply directly.\n"
+        f"If a specific application/learn-more URL is mentioned in the source facts above, feature it directly.\n"
+        f"Otherwise, link the official announcement: {source_url}\n"
+        f"Format the link cleanly as '🔗 Learn more / Apply here: <URL>' or '🔗 Official Announcement: <URL>'.\n"
         f"Format strictly for {platform} with double line breaks and clear headers/bullet points."
     )
     initial_draft = call_ai(provider_id, draft_prompt, drafter_sys)
@@ -755,6 +788,7 @@ def run_roundtable(provider_id: str, title: str, context: str, platform: str, to
     hook_prompt = (
         f"Take this fact-checked draft for {platform} and maximize its reader engagement.\n"
         f"Draft:\n{fact_checked_draft}\n\n"
+        f"Ensure there is a clear, actionable resource link at the end (e.g. '🔗 Learn more / Apply here: ...') so readers can click through.\n"
         f"Target platform: {platform}.\n"
         "Return ONLY the final, ready-to-post text."
     )
@@ -2517,7 +2551,7 @@ class Handler(BaseHTTPRequestHandler):
                             img_p = f"Photorealistic minimal tech art representing {s['title']}, obsidian and emerald aesthetic, cinematic lighting"
                             res = {"final_post": final_post, "image_prompt": img_p}
                         else:
-                            res = run_roundtable(provider, s["title"], context, "LinkedIn")
+                            res = run_roundtable(provider, s["title"], context, "LinkedIn", source_url=s.get("url", ""))
 
                         stamp = now_iso()
                         with db() as conn:
@@ -2730,7 +2764,7 @@ class Handler(BaseHTTPRequestHandler):
                         deep_text = ""
                 context = deep_text if deep_text and not deep_text.startswith("(") else (snippet or title)
                 
-                res = run_roundtable(provider, title, context, platform, tone=tone)
+                res = run_roundtable(provider, title, context, platform, tone=tone, source_url=url)
                 
                 media_url = ""
                 if draw_things_available():
@@ -2793,7 +2827,7 @@ class Handler(BaseHTTPRequestHandler):
                     tone = payload.get("tone", "thought_leadership")
 
                     if task == "roundtable":
-                        res = run_roundtable(provider, title, context, platform, tone=tone)
+                        res = run_roundtable(provider, title, context, platform, tone=tone, source_url=payload.get("source_url") or payload.get("url") or "")
                         self.send_json({"ok": True, "result": res["final_post"], "image_prompt": res["image_prompt"], "log": res["roundtable_log"]})
                         return
 
