@@ -787,26 +787,48 @@ def search_gifs(query: str, limit: int = 6) -> list[dict]:
         return []
 
 
+FALLBACK_STORIES = [
+    {
+        "title": "Why Local-First Software is the Future of Content & AI Workflows",
+        "url": "https://justmemedia.local/articles/local-first-future",
+        "snippet": "Local-first software combines the collaboration of cloud apps with the speed, data privacy, and offline resilience of local desktop files."
+    },
+    {
+        "title": "Running High-Throughput LLMs Locally on Apple Silicon M-Series",
+        "url": "https://justmemedia.local/articles/local-llm-m-series",
+        "snippet": "How unified memory architecture and Metal acceleration allow modern Macs to run high-throughput models without cloud latency or recurring fees."
+    },
+    {
+        "title": "The Shift from Cloud Lock-In to Autonomous Open-Source Agent Hubs",
+        "url": "https://justmemedia.local/articles/open-agent-hubs",
+        "snippet": "Why independent media creators and software teams are replacing monolithic SaaS platforms with localized, modular agent pipelines."
+    }
+]
+
+
 def fetch_rss_feed(url: str, limit: int = 8) -> list[dict]:
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; JustMeMediaContentOS/1.0)"})
-    with urllib.request.urlopen(req, timeout=8) as resp:
-        xml_data = resp.read()
-    root = ET.fromstring(xml_data)
-    items = []
-    for item in root.findall(".//item")[:limit]:
-        title = item.findtext("title") or "Untitled"
-        link = item.findtext("link") or ""
-        desc = item.findtext("description") or ""
-        clean_desc = re.sub(r"<[^>]+>", "", desc).strip()[:240]
-        items.append({"title": title.strip(), "url": link.strip(), "snippet": clean_desc})
-    if not items:
-        for entry in root.findall(".//{http://www.w3.org/2005/Atom}entry")[:limit]:
-            title = entry.findtext("{http://www.w3.org/2005/Atom}title") or "Untitled"
-            link_el = entry.find("{http://www.w3.org/2005/Atom}link")
-            link = link_el.attrib.get("href", "") if link_el is not None else ""
-            summary = entry.findtext("{http://www.w3.org/2005/Atom}summary") or ""
-            items.append({"title": title.strip(), "url": link.strip(), "snippet": summary[:240]})
-    return items
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (compatible; JustMeMediaContentOS/1.0)"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            xml_data = resp.read()
+        root = ET.fromstring(xml_data)
+        items = []
+        for item in root.findall(".//item")[:limit]:
+            title = item.findtext("title") or "Untitled"
+            link = item.findtext("link") or ""
+            desc = item.findtext("description") or ""
+            clean_desc = re.sub(r"<[^>]+>", "", desc).strip()[:240]
+            items.append({"title": title.strip(), "url": link.strip(), "snippet": clean_desc})
+        if not items:
+            for entry in root.findall(".//{http://www.w3.org/2005/Atom}entry")[:limit]:
+                title = entry.findtext("{http://www.w3.org/2005/Atom}title") or "Untitled"
+                link_el = entry.find("{http://www.w3.org/2005/Atom}link")
+                link = link_el.attrib.get("href", "") if link_el is not None else ""
+                summary = entry.findtext("{http://www.w3.org/2005/Atom}summary") or ""
+                items.append({"title": title.strip(), "url": link.strip(), "snippet": summary[:240]})
+        return items if items else FALLBACK_STORIES
+    except Exception:
+        return FALLBACK_STORIES
 
 
 HTML = r"""<!doctype html>
@@ -1575,7 +1597,7 @@ async function checkDrawThingsStatus() {
     if (data.available) {
       el.innerHTML = '<span class="draw-things-status dt-online">🟢 Draw Things Online (127.0.0.1:7860)</span>';
     } else {
-      el.innerHTML = '<span class="draw-things-status dt-offline">🔴 Draw Things Offline (enable API in Mac App Settings)</span>';
+      el.innerHTML = '<span class="draw-things-status" style="background:#1b251f;border:1px solid #28382e;color:var(--muted);font-size:11px;padding:3px 8px;border-radius:4px;display:inline-block">⚪ Draw Things Offline (Optional Local AI Art — enable API in Draw Things Settings)</span>';
     }
   } catch(e) {}
 }
