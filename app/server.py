@@ -482,11 +482,12 @@ async function fetchFeed(url) {
       listEl.innerHTML = '<div style="color:var(--muted);padding:10px 0">No stories found in feed.</div>';
       return;
     }
-    listEl.innerHTML = items.map(item => `
+    window._sources = items;
+    listEl.innerHTML = items.map((item, idx) => `
       <div class="source-item">
         <a href="${item.url}" target="_blank" rel="noopener">${escapeHtml(item.title)}</a>
         <p style="margin:4px 0 6px;color:var(--muted);font-size:11px">${escapeHtml(item.snippet)}</p>
-        <button class="btn btn-secondary btn-small" onclick="useStoryForDraft(${escapeJsArg(item.title)}, ${escapeJsArg(item.snippet)}, ${escapeJsArg(item.url)})">
+        <button class="btn btn-secondary btn-small" onclick="useStory(${idx})">
           ⚡ Draft from Story
         </button>
       </div>
@@ -496,10 +497,12 @@ async function fetchFeed(url) {
   }
 }
 
-function useStoryForDraft(title, snippet, url) {
-  document.getElementById('draftTitle').value = title;
-  document.getElementById('draftBody').value = snippet;
-  document.getElementById('draftSourceUrl').value = url;
+function useStory(idx) {
+  const item = (window._sources || [])[idx];
+  if (!item) return;
+  document.getElementById('draftTitle').value = item.title;
+  document.getElementById('draftBody').value = item.snippet;
+  document.getElementById('draftSourceUrl').value = item.url;
   updateCharCount();
   document.getElementById('draftTitle').focus();
 }
@@ -639,6 +642,9 @@ async function loadDrafts() {
     return;
   }
 
+  window._drafts = {};
+  drafts.forEach(d => { window._drafts[d.id] = d; });
+
   queueEl.innerHTML = drafts.map(d => {
     const statusClass = d.status === 'Approved' ? 'status-approved' : (d.status === 'Published' ? 'status-published' : 'status-draft');
     return `
@@ -656,13 +662,13 @@ async function loadDrafts() {
           <div class="image-prompt-box">
             <strong>🎨 Visual Prompt:</strong> ${escapeHtml(d.image_prompt)}
             <div style="margin-top:4px">
-              <button class="btn btn-secondary btn-small" onclick="copyText(${escapeJsArg(d.image_prompt)})">Copy Prompt</button>
+              <button class="btn btn-secondary btn-small" onclick="copyPromptText(${d.id})">Copy Prompt</button>
             </div>
           </div>
         ` : ''}
 
         <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:10px">
-          <button class="btn btn-secondary btn-small" onclick="copyText(${escapeJsArg(d.body)})">📋 Copy Post</button>
+          <button class="btn btn-secondary btn-small" onclick="copyDraftText(${d.id})">📋 Copy Post</button>
           <button class="btn btn-secondary btn-small" onclick="downloadMarkdown(${d.id})">📥 Export .MD</button>
           ${d.status !== 'Approved' ? `
             <button class="btn btn-approve btn-small" onclick="approveDraft(${d.id})">✅ Approve</button>
@@ -679,6 +685,16 @@ async function loadDrafts() {
       </div>
     `;
   }).join('');
+}
+
+function copyDraftText(id) {
+  const d = (window._drafts || {})[id];
+  if (d && d.body) copyText(d.body);
+}
+
+function copyPromptText(id) {
+  const d = (window._drafts || {})[id];
+  if (d && d.image_prompt) copyText(d.image_prompt);
 }
 
 async function approveDraft(id) {
@@ -717,10 +733,6 @@ function exportAllMarkdown() {
 
 function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-}
-
-function escapeJsArg(s) {
-  return JSON.stringify(String(s ?? ''));
 }
 
 // Initial bootstrap
@@ -781,6 +793,11 @@ class Handler(BaseHTTPRequestHandler):
             parsed = urlparse(self.path)
             path = parsed.path
             query = parse_qs(parsed.query)
+
+            if path == "/favicon.ico":
+                self.send_response(204)
+                self.end_headers()
+                return
 
             if path == "/":
                 self._send(HTML.encode("utf-8"))
