@@ -499,16 +499,17 @@ def ollama_info() -> dict:
 
 def get_available_providers() -> dict:
     providers = []
+    # Fast cloud providers first so the default dropdown selection is ultra-fast
+    if os.environ.get("GROQ_API_KEY"):
+        providers.append({"id": "groq:llama-3.3-70b-versatile", "name": "⚡ Groq Cloud: Llama 3.3 70B (Ultra-Fast)", "type": "cloud"})
+
+    if os.environ.get("GEMINI_API_KEY"):
+        providers.append({"id": "gemini:gemini-2.5-flash", "name": "✨ Google Gemini 2.5 Flash (Cloud)", "type": "cloud"})
+
     ollama = ollama_info()
     if ollama.get("available"):
         for m in ollama.get("models", []):
-            providers.append({"id": f"ollama:{m}", "name": f"Local Ollama: {m}", "type": "local"})
-
-    if os.environ.get("GROQ_API_KEY"):
-        providers.append({"id": "groq:llama-3.3-70b-versatile", "name": "Groq Cloud: Llama 3.3 70B (Free/Fast)", "type": "cloud"})
-
-    if os.environ.get("GEMINI_API_KEY"):
-        providers.append({"id": "gemini:gemini-2.5-flash", "name": "Google Gemini 2.5 Flash (Cloud)", "type": "cloud"})
+            providers.append({"id": f"ollama:{m}", "name": f"🖥️ Local Ollama: {m}", "type": "local"})
 
     if not providers:
         providers.append({"id": "none", "name": "No AI Providers Detected (Manual Mode)", "type": "none"})
@@ -550,9 +551,13 @@ def call_ai(provider_id: str, prompt: str, system_prompt: str = "") -> str:
                 data=json.dumps(payload).encode("utf-8"),
                 headers={"Content-Type": "application/json"}
             )
-            with urllib.request.urlopen(req, timeout=120) as resp:
+            with urllib.request.urlopen(req, timeout=180) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
-                return data.get("response", "").strip()
+                raw_resp = data.get("response", "").strip()
+                clean_resp = re.sub(r"<think>.*?</think>", "", raw_resp, flags=re.DOTALL).strip()
+                return clean_resp if clean_resp else raw_resp
+        except TimeoutError:
+            raise RuntimeError(f"Local Ollama model '{model_name}' timed out after 180s. Try selecting Groq Cloud or a smaller model.") from None
         except urllib.error.URLError as exc:
             raise RuntimeError(f"Local Ollama model '{model_name}' failed to connect. Is Ollama running? ({exc})") from exc
 
@@ -1878,13 +1883,37 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/autopilot":
                 try:
                     feed_url = query.get("feed_url", ["https://news.ycombinator.com/rss"])[0]
-                    provider = query.get("provider", ["ollama"])[0]
+                    provider = query.get("provider", [""])[0]
+                    if not provider or provider == "none":
+                        provider = "groq:llama-3.3-70b-versatile" if os.environ.get("GROQ_API_KEY") else "auto"
                     stories = fetch_rss_feed(feed_url, limit=3)
                     created_count = 0
                     for s in stories:
-                        deep_text = extract_article_text(s["url"])
-                        context = deep_text if deep_text and not deep_text.startswith("(") else s["snippet"]
-                        res = run_roundtable(provider, s["title"], context, "LinkedIn")
+                        context = s.get("snippet", "")
+                        try:
+                            deep_text = extract_article_text(s["url"])
+                            if deep_text and not deep_text.startswith("("):
+                                context = deep_text[:1500]
+                        except Exception:
+                            pass
+
+                        # If using local Ollama, generate direct high-signal draft to prevent timeouts;
+                        # if using Groq or Gemini cloud, run the full 4-agent Roundtable
+                        if provider.startswith("ollama:"):
+                            sys_p = "You are the JustMeMedia Content Engine. Write high-engagement, brand-aligned posts with zero hype."
+                            prompt = (
+                                f"Write a high-engagement LinkedIn thought leadership post about:\n"
+                                f"Headline: {s['title']}\n"
+                                f"Context: {context}\n\n"
+                                f"Include a punchy hook, concise takeaways, engaging discussion question, and 3 hashtags."
+                            )
+                            raw_post = call_ai(provider, prompt, sys_p)
+                            final_post = inject_viral_hook(strip_ai_slop(raw_post), s["title"])
+                            img_p = f"Photorealistic minimal tech art representing {s['title']}, obsidian and emerald aesthetic, cinematic lighting"
+                            res = {"final_post": final_post, "image_prompt": img_p}
+                        else:
+                            res = run_roundtable(provider, s["title"], context, "LinkedIn")
+
                         stamp = now_iso()
                         with db() as conn:
                             conn.execute(
