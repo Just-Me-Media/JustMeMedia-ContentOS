@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""JustMeMedia ContentOS - 24/7 Background Autopilot Worker.
+
+Designed for headless execution on Windows (ThinkCentre) or macOS (M1 Pro).
+Continuously monitors RSS feeds, deep-scrapes new stories, runs the
+Multi-Agent Roundtable editorial pipeline, and queues fresh drafts into
+the local SQLite database for human approval.
+
+Usage:
+    python3 app/worker.py --once
+    python3 app/worker.py --daemon --interval 3600
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+# Add project root to path
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from app.server import (
+    db, now_iso, fetch_rss_feed, extract_article_text,
+    run_roundtable, get_available_providers
+)
+
+DEFAULT_FEEDS = [
+    "https://news.ycombinator.com/rss",
+    "https://rss.nytimes.com/services/xml/rss/nyt/Technology.xml",
+    "https://feeds.arstechnica.com/arstechnica/index"
+]
+
+
+def log(msg: str) -> None:
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    print(f"[{stamp}] [ContentOS Worker] {msg}", flush=True)
+
+
+def is_url_already_processed(url: str) -> bool:
+    if not url:
+        return False
+    with db() as conn:
+        cur = conn.execute("SELECT 1 FROM drafts WHERE source_url = ? LIMIT 1", (url,))
+        if cur.fetchone():
+            return True
+        cur = conn.execute("SELECT 1 FROM sources WHERE url = ? LIMIT 1", (url,))
+        if cur.fetchone():
+            return True
+    return False
+
+
+def run_worker_cycle(provider: str | None = None, limit_per_feed: int = 1) -> int:
+    """Scan feeds, find new stories, run roundtable, and queue drafts."""
+    # Determine best provider if not specified
+    if not provider:
+        prov_info = get_available_providers()
+        prov_list = prov_info.get("providers", [])
+        if prov_list and prov_list[0]["id"] != "none":
+            provider = prov_list[0]["id"]
+        else:
+            provider = "auto"
+
+    log(f"Starting intake cycle using AI provider: {provider}")
+    drafts_created = 0
+
+    for feed_url in DEFAULT_FEEDS:
+        try:
+            log(f"Checking feed: {feed_url}")
+            stories = fetch_rss_feed(feed_url, limit=limit_per_feed + 2)
+            for story in stories:
+                url = story["url"]
+                title = story["title"]
+                
+                if is_url_already_processed(url):
+                    continue
+
+                log(f"Discovered fresh story: '{title}'")
+                deep_text = extract_article_text(url)
+                context = deep_text if deep_text and not deep_text.startswith("(") else story["snippet"]
+
+                # Run Multi-Agent Roundtable
+                log(f"Conferring Roundtable Editorial Team on '{title}'...")
+                res = run_roundtable(provider, title, context, platform="LinkedIn", tone="thought_leadership")
+                
+                stamp = now_iso()
+                with db() as conn:
+                    # Record source provenance
+                    conn.execute(
+                        """INSERT OR IGNORE INTO sources(id, url, title, publisher, retrieved_at, raw_text, summary)
+                           VALUES(?,?,?,?,?,?,?)""",
+                        (f"src_{stamp[:10]}_{hash(url) & 0xffffff:06x}", url, title, "RSS", stamp, context[:5000], story["snippet"])
+                    )
+                    # Insert draft for human approval
+                    conn.execute(
+                        """INSERT INTO drafts(title, body, platform, status, image_prompt, source_url, created_at, updated_at)
+                           VALUES(?,?,?,?,?,?,?,?)""",
+                        (title[:200], res["final_post"], "LinkedIn", "Draft", res["image_prompt"], url, stamp, stamp)
+                    )
+
+                drafts_created += 1
+                log(f"Successfully queued draft: '{title}' (ID ready for review)")
+                
+                # Pace between stories
+                time.sleep(2)
+
+        except Exception as exc:
+            log(f"Error processing feed {feed_url}: {exc}")
+
+    log(f"Intake cycle finished. New drafts queued: {drafts_created}")
+    return drafts_created
+
+
+def main():
+    parser = argparse.ArgumentParser(description="JustMeMedia ContentOS Background Autopilot Worker")
+    parser.add_argument("--daemon", action="store_true", help="Run indefinitely in background loop")
+    parser.add_argument("--once", action="store_true", help="Run a single intake cycle and exit")
+    parser.add_argument("--interval", type=int, default=3600, help="Interval in seconds between cycles (default: 3600)")
+    parser.add_argument("--provider", type=str, default="", help="Specific AI provider ID (e.g. 'groq:...', 'ollama:...')")
+    args = parser.parse_args()
+
+    if args.once or not args.daemon:
+        run_worker_cycle(provider=args.provider or None)
+        return
+
+    log(f"Daemon mode started. Polling every {args.interval} seconds. Press Ctrl+C to stop.")
+    while True:
+        try:
+            run_worker_cycle(provider=args.provider or None)
+        except Exception as exc:
+            log(f"Unhandled error in cycle: {exc}")
+        
+        log(f"Sleeping for {args.interval}s until next cycle...")
+        time.sleep(args.interval)
+
+
+if __name__ == "__main__":
+    main()
