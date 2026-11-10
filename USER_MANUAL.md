@@ -115,16 +115,36 @@ Column 1 (**Content Discovery**) surfaces live news, trends, and stories to spar
 5. Review the post in Column 3, make any tweaks if you wish, and click **`🚀 Copy & Launch LinkedIn ↗`** or **`🚀 Copy & Launch X ↗`**.
 
 #### ⚡ Manual & Step-by-Step Discovery Options:
-1. **Select a Curated Feed:**
-   * **Hacker News Top Stories** (Engineering, startups, tech breakthroughs)
-   * **NYT Technology News** (Mainstream industry news)
-   * **Ars Technica Tech & AI** (In-depth analysis and computing)
-2. **Or Add a Custom RSS Feed:**
-   * Paste any RSS or Atom feed URL into the input box and click **Load**.
-3. **Step-by-Step Deep-Read & Draft:**
-   * Click **⚡ Deep-Read & Draft** on any card to load the story into Column 2 for manual editing before generating.
-4. **Autonomous Batch Intake (Autopilot):**
-   * Want 3 posts drafted simultaneously? Click **⚡ Draft Top 3 Stories** under Autopilot Batch.
+
+**🍎 Apple (Official)**
+- `Apple Developer News` — Direct from Apple Developer Relations (your source!)
+- `Apple Newsroom` — Apple's official press releases and announcements
+
+**🔵 Google (Official)**
+- `Google AI Blog` — Official Google AI research & product updates
+- `Google The Keyword` — Google's official company news blog
+
+**🤖 AI Labs**
+- `OpenAI News` — Official OpenAI announcements & research
+- `Anthropic` — via TechCrunch tag feed (Claude, Constitutional AI, safety)
+- `DeepSeek` — via TechCrunch tag feed
+- `xAI / Grok` — via TechCrunch tag feed (Elon Musk's AI lab)
+- `Meta AI` — via TechCrunch tag feed (Llama, Horizon)
+- `Microsoft AI` — via TechCrunch tag feed (Copilot, Azure OpenAI)
+
+**📰 Tech & AI News**
+- `Hacker News Top Stories` / `Hacker News Frontpage`
+- `Ars Technica Tech & AI`
+- `MIT Technology Review AI`
+- `TechCrunch AI`
+- `NYT Technology News`
+
+> [!TIP] ContentOS defaults to **Apple Developer News** on launch. Switch to any source with one click from the dropdown, or paste any custom RSS/Atom URL and hit **Load**.
+
+1. **Select a Verified Feed** from the grouped dropdown.
+2. **Or Add a Custom RSS Feed:** Paste any RSS or Atom feed URL into the custom input and click **Load**.
+3. **Step-by-Step Deep-Read & Draft:** Click **⚡ Deep-Read & Draft** on any card to load the story into Column 2 for manual editing before generating.
+4. **Autonomous Batch Intake (Autopilot):** Want 3 posts drafted simultaneously? Click **⚡ Draft Top 3 Stories** under Autopilot Batch.
 
 ---
 

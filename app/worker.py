@@ -28,10 +28,27 @@ from app.server import (
     run_roundtable, get_available_providers
 )
 
+# Verified primary sources — checked live 2026-11-10
 DEFAULT_FEEDS = [
+    # 🍎 Apple official
+    "https://developer.apple.com/news/rss/news.rss",
+    "https://www.apple.com/newsroom/rss-feed.rss",
+    # 🔵 Google official
+    "https://blog.google/technology/ai/rss/",
+    "https://blog.google/rss/",
+    # 🤖 AI Labs (via TechCrunch tag feeds — most reliable)
+    "https://openai.com/news/rss.xml",
+    "https://techcrunch.com/tag/anthropic/feed/",
+    "https://techcrunch.com/tag/deepseek/feed/",
+    "https://techcrunch.com/tag/xai/feed/",
+    "https://techcrunch.com/tag/meta-ai/feed/",
+    "https://techcrunch.com/tag/microsoft-ai/feed/",
+    # 📰 Tech & AI aggregators
+    "https://techcrunch.com/category/artificial-intelligence/feed/",
+    "https://www.technologyreview.com/topic/artificial-intelligence/feed/",
+    "https://feeds.arstechnica.com/arstechnica/index",
     "https://news.ycombinator.com/rss",
     "https://rss.nytimes.com/services/xml/rss/nyt/Technology.xml",
-    "https://feeds.arstechnica.com/arstechnica/index"
 ]
 
 

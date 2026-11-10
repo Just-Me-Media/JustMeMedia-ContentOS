@@ -992,12 +992,33 @@ textarea{min-height:160px;resize:vertical;font-family:inherit}
 <main>
   <!-- COLUMN 1: DISCOVERY & INTAKE -->
   <section>
-    <h2>1. Content Discovery <span style="font-size:11px;font-weight:normal;color:var(--muted)">Free RSS Feeds</span></h2>
-    <label for="rssPreset">Curated Industry Feeds</label>
+    <h2>1. Content Discovery <span style="font-size:11px;font-weight:normal;color:var(--muted)">Verified Sources + RSS</span></h2>
+    <label for="rssPreset">Curated Verified Sources</label>
     <select id="rssPreset" onchange="fetchFeed(this.value)">
-      <option value="https://news.ycombinator.com/rss">Hacker News Top Stories</option>
-      <option value="https://rss.nytimes.com/services/xml/rss/nyt/Technology.xml">NYT Technology News</option>
-      <option value="https://feeds.arstechnica.com/arstechnica/index">Ars Technica Tech & AI</option>
+      <optgroup label="🍎 Apple (Official)">
+        <option value="https://developer.apple.com/news/rss/news.rss">Apple Developer News ✅</option>
+        <option value="https://www.apple.com/newsroom/rss-feed.rss">Apple Newsroom ✅</option>
+      </optgroup>
+      <optgroup label="🔵 Google (Official)">
+        <option value="https://blog.google/technology/ai/rss/">Google AI Blog ✅</option>
+        <option value="https://blog.google/rss/">Google The Keyword ✅</option>
+      </optgroup>
+      <optgroup label="🤖 AI Labs">
+        <option value="https://openai.com/news/rss.xml">OpenAI News ✅</option>
+        <option value="https://techcrunch.com/tag/anthropic/feed/">Anthropic (via TechCrunch) ✅</option>
+        <option value="https://techcrunch.com/tag/deepseek/feed/">DeepSeek (via TechCrunch) ✅</option>
+        <option value="https://techcrunch.com/tag/xai/feed/">xAI / Grok (via TechCrunch) ✅</option>
+        <option value="https://techcrunch.com/tag/meta-ai/feed/">Meta AI (via TechCrunch) ✅</option>
+        <option value="https://techcrunch.com/tag/microsoft-ai/feed/">Microsoft AI (via TechCrunch) ✅</option>
+      </optgroup>
+      <optgroup label="📰 Tech & AI News">
+        <option value="https://news.ycombinator.com/rss">Hacker News Top Stories</option>
+        <option value="https://hnrss.org/frontpage">Hacker News Frontpage</option>
+        <option value="https://feeds.arstechnica.com/arstechnica/index">Ars Technica Tech & AI</option>
+        <option value="https://www.technologyreview.com/topic/artificial-intelligence/feed/">MIT Technology Review AI</option>
+        <option value="https://techcrunch.com/category/artificial-intelligence/feed/">TechCrunch AI</option>
+        <option value="https://rss.nytimes.com/services/xml/rss/nyt/Technology.xml">NYT Technology News</option>
+      </optgroup>
     </select>
     <div style="display:flex;gap:6px;margin-top:8px">
       <input id="customRss" placeholder="Paste custom RSS/Atom URL">
@@ -1894,7 +1915,9 @@ async function notifyDraft(id) {
 
 // Initial bootstrap
 loadStatus();
-fetchFeed(document.getElementById('rssPreset').value);
+// Default to Apple Developer News on load
+document.getElementById('rssPreset').value = 'https://developer.apple.com/news/rss/news.rss';
+fetchFeed('https://developer.apple.com/news/rss/news.rss');
 loadDrafts();
 checkDrawThingsStatus();
 setInterval(checkDrawThingsStatus, 30000);
