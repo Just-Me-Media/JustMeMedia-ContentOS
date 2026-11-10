@@ -246,6 +246,26 @@ class TestPhasesAtoE(unittest.TestCase):
             finally:
                 s.DB_PATH = orig
 
+    def test_check_scheduled_drafts(self):
+        from app.server import check_scheduled_drafts
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            test_dir = Path(tmp_dir)
+            import app.server as s
+            orig = s.DB_PATH
+            s.DB_PATH = test_dir / "contentos.db"
+            try:
+                stamp = now_iso()
+                with db() as conn:
+                    conn.execute(
+                        "INSERT INTO drafts(title, body, platform, status, scheduled_for, created_at, updated_at) "
+                        "VALUES(?,?,?,?,?,?,?)",
+                        ("Past Due Post", "Body", "LinkedIn", "Draft", "2020-01-01 09:00", stamp, stamp)
+                    )
+                notified = check_scheduled_drafts()
+                self.assertTrue(any(d["title"] == "Past Due Post" for d in notified))
+            finally:
+                s.DB_PATH = orig
+
 
 if __name__ == "__main__":
     unittest.main()

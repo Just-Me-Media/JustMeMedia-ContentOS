@@ -102,6 +102,20 @@ The worker scans feeds periodically, performs duplicate checks against the local
 
 Column 1 (**Content Discovery**) surfaces live news, trends, and stories to spark high-signal posts.
 
+
+#### 🔍 Instant Topic Chips & Live Keyword Filtering
+Right above your story list in Column 1, you have:
+* **One-Click Topic Chips:** `🌐 All`, `🤖 AI`, `🍎 Apple`, `🔵 Google`, `OpenAI`, `Anthropic`, `DeepSeek`, `xAI/Grok`, `💻 Dev`. Click any chip to instantly isolate those stories.
+* **Instant Keyword Filter Bar:** Type any term (e.g., `Siri`, `Vision`, `agent`) to filter stories in real-time as you type.
+
+#### 📱 Free Mobile Push Notifications (ntfy.sh)
+Want your phone to buzz the second your post finishes drafting or when its posting slot arrives?
+1. Download the free **ntfy** app from the iOS App Store or Google Play Store (zero login/account required).
+2. Choose a topic name (e.g. `justme-contentos-alerts`) and subscribe in the app.
+3. In ContentOS, open the **Webhooks & Notifications** drawer in Column 3.
+4. Type your topic name into the **Phone Push Notification** box and click **Test Alert**.
+5. Your phone will instantly receive notifications with priority badges and action previews!
+
 #### ☕ The "Wake Up & Make Tea" 1-Click Pipeline (Fastest Workflow)
 1. In the morning, open `http://127.0.0.1:8765`.
 2. Browse the stories in Column 1 and find one that interests you.

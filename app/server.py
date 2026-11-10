@@ -13,7 +13,9 @@ import os
 import random
 import re
 import sqlite3
+import subprocess
 import sys
+import threading
 import time
 import traceback
 import urllib.error
@@ -800,6 +802,73 @@ def calculate_next_optimal_slot() -> str:
 
     return target.strftime("%Y-%m-%d %H:%M")
 
+_NOTIFIED_SCHEDULED_DRAFTS: set[int] = set()
+
+def check_scheduled_drafts() -> list[dict]:
+    """Background check for drafts that have reached their scheduled time slot."""
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    notified = []
+    try:
+        with db() as conn:
+            cur = conn.execute(
+                """SELECT id, title, platform, scheduled_for, status 
+                   FROM drafts 
+                   WHERE scheduled_for != '' 
+                     AND scheduled_for <= ? 
+                     AND status IN ('Draft', 'Approved')""",
+                (now_str,)
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+        
+        for r in rows:
+            draft_id = r["id"]
+            if draft_id not in _NOTIFIED_SCHEDULED_DRAFTS:
+                _NOTIFIED_SCHEDULED_DRAFTS.add(draft_id)
+                notified.append(r)
+                msg = f"Time to publish '{r['title'][:40]}' on {r['platform']}! (Scheduled for {r['scheduled_for']})"
+                print(f"[ContentOS Scheduler] ⏰ {msg}")
+                # 1. Native Mac Desktop Notification
+                if sys.platform == "darwin":
+                    try:
+                        safe_title = r['title'][:40].replace('"', '\"').replace("'", "")
+                        safe_msg = f"Scheduled for {r['platform']} ({r['scheduled_for']})".replace('"', '\"').replace("'", "")
+                        subprocess.run(
+                            ["osascript", "-e", f'display notification "{safe_msg}" with title "ContentOS: Time to Post!" subtitle "{safe_title}" sound name "Glass"'],
+                            capture_output=True, timeout=2
+                        )
+                    except Exception:
+                        pass
+                # 2. Webhook notification if configured
+                try:
+                    cfg = get_webhook_config()
+                    alert_draft = {
+                        "title": f"⏰ Time to Post: {r['title']}",
+                        "body": f"This post was scheduled for {r['scheduled_for']} on {r['platform']}. Open ContentOS to publish!",
+                        "platform": r["platform"],
+                        "status": r["status"]
+                    }
+                    if cfg.get("discord"):
+                        send_webhook(cfg["discord"], build_discord_payload(alert_draft))
+                    if cfg.get("slack"):
+                        send_webhook(cfg["slack"], build_slack_payload(alert_draft))
+                except Exception:
+                    pass
+    except Exception as e:
+        print(f"[ContentOS Scheduler Error] {e}")
+    return notified
+
+def _scheduler_loop() -> None:
+    while True:
+        try:
+            check_scheduled_drafts()
+        except Exception:
+            pass
+        time.sleep(30)
+
+def start_scheduler_daemon() -> None:
+    t = threading.Thread(target=_scheduler_loop, daemon=True, name="ContentOS-Scheduler")
+    t.start()
+
 
 def format_as_thread(post_text: str, max_tweet_len: int = 270) -> list[str]:
     """Split a long post into numbered tweet segments for X."""
@@ -943,6 +1012,9 @@ textarea{min-height:160px;resize:vertical;font-family:inherit}
 .status-draft{background:#2d3748;color:#cbd5e0}
 .status-approved{background:#22543d;color:#9ae6b4}
 .status-published{background:#2c5282;color:#bee3f8}
+.chip{background:var(--panel-alt);border:1px solid var(--line);color:var(--muted);padding:3px 10px;border-radius:12px;font-size:11px;cursor:pointer;transition:all .15s}
+.chip:hover{border-color:#4a5568;color:var(--text)}
+.chip-active{background:#22543d;border-color:#2f855a;color:#9ae6b4;font-weight:700}
 .scheduled-pill{font-size:10px;background:#1a202c;border:1px solid #4a5568;color:#90cdf4;padding:2px 7px;border-radius:10px;font-weight:600;display:inline-flex;align-items:center;gap:4px}
 .slot-select{background:var(--panel);border:1px solid var(--line);color:var(--text);font-size:11px;padding:3px 6px;border-radius:4px;outline:none;cursor:pointer}
 .item-card{background:var(--panel-alt);border:1px solid var(--line);border-radius:8px;padding:12px;margin-bottom:12px;position:relative}
@@ -1034,7 +1106,19 @@ textarea{min-height:160px;resize:vertical;font-family:inherit}
     </div>
     
     <label style="margin-top:16px">Top Stories & Trends</label>
-    <div id="sourcesList" style="flex:1;overflow-y:auto;max-height:480px">Loading stories…</div>
+    <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap" id="topicChips">
+      <button class="chip chip-active" onclick="filterTopic('')" id="chip_all">🌐 All</button>
+      <button class="chip" onclick="filterTopic('AI')" id="chip_ai">🤖 AI</button>
+      <button class="chip" onclick="filterTopic('Apple')" id="chip_apple">🍎 Apple</button>
+      <button class="chip" onclick="filterTopic('Google')" id="chip_google">🔵 Google</button>
+      <button class="chip" onclick="filterTopic('OpenAI')" id="chip_openai">OpenAI</button>
+      <button class="chip" onclick="filterTopic('Claude|Anthropic')" id="chip_anthropic">Anthropic</button>
+      <button class="chip" onclick="filterTopic('DeepSeek')" id="chip_deepseek">DeepSeek</button>
+      <button class="chip" onclick="filterTopic('Grok|xAI')" id="chip_xai">xAI/Grok</button>
+      <button class="chip" onclick="filterTopic('developer|SDK|API')" id="chip_dev">💻 Dev</button>
+    </div>
+    <input id="keywordFilter" placeholder="🔍 Filter stories by keyword…" oninput="applyFilter()" style="width:100%;margin-bottom:8px">
+    <div id="sourcesList" style="flex:1;overflow-y:auto;max-height:420px">Loading stories…</div>
   </section>
 
   <!-- COLUMN 2: DRAFTING & AI ENGINE -->
@@ -1190,6 +1274,15 @@ textarea{min-height:160px;resize:vertical;font-family:inherit}
         <button class="btn btn-small btn-secondary" onclick="testWebhook('custom')">Test</button>
       </div>
       <button class="btn btn-small" style="margin-top:8px" onclick="saveWebhooks()">Save Webhook URLs</button>
+
+      <div style="border-top:1px solid var(--line);margin:12px 0 8px;padding-top:10px">
+        <label style="font-size:11px;font-weight:700;color:#9ae6b4">📱 Phone Push Notification (ntfy.sh - 100% Free)</label>
+        <p style="font-size:10px;color:var(--muted);margin:2px 0 6px">Get instant alerts on iPhone/Android when a post finishes drafting or hits its schedule.</p>
+        <div class="webhook-row">
+          <input id="ntfyTopicInput" placeholder="e.g. justme-contentos-alerts" onchange="setNtfyTopic(this.value)">
+          <button class="btn btn-small" style="background:#22543d;color:#9ae6b4;border:1px solid #2f855a" onclick="testPhonePush()">Test Alert</button>
+        </div>
+      </div>
     </div>
 
     <div id="draftsQueue" style="flex:1;overflow-y:auto;max-height:680px">Loading drafts…</div>
@@ -1200,6 +1293,10 @@ textarea{min-height:160px;resize:vertical;font-family:inherit}
 let currentProviders = [];
 
 async function loadStatus() {
+  const savedTopic = getNtfyTopic();
+  if (savedTopic && document.getElementById('ntfyTopicInput')) {
+    document.getElementById('ntfyTopicInput').value = savedTopic;
+  }
   try {
     const res = await fetch('/api/providers');
     const data = await res.json();
@@ -1209,6 +1306,62 @@ async function loadStatus() {
   } catch (err) {
     console.error('Failed to load providers', err);
   }
+}
+
+// ── KEYWORD FILTER ────────────────────────────────────────────────────────────
+let _activeTopicRegex = null;
+
+function filterTopic(pattern) {
+  _activeTopicRegex = pattern ? new RegExp(pattern, 'i') : null;
+  // Update chip styles
+  document.querySelectorAll('.chip').forEach(c => c.classList.remove('chip-active'));
+  const chipId = pattern ? 'chip_' + pattern.split('|')[0].toLowerCase().replace(/[^a-z]/g,'') : 'chip_all';
+  const activeChip = document.getElementById(chipId);
+  if (activeChip) activeChip.classList.add('chip-active');
+  else document.getElementById('chip_all').classList.add('chip-active');
+  applyFilter();
+}
+
+function applyFilter() {
+  const kw = (document.getElementById('keywordFilter').value || '').trim().toLowerCase();
+  const items = window._sources || [];
+  const cards = document.querySelectorAll('#sourcesList .source-item');
+  items.forEach((item, idx) => {
+    if (idx >= cards.length) return;
+    const text = (item.title + ' ' + item.snippet).toLowerCase();
+    const kwMatch = !kw || text.includes(kw);
+    const topicMatch = !_activeTopicRegex || _activeTopicRegex.test(item.title + ' ' + item.snippet);
+    cards[idx].style.display = (kwMatch && topicMatch) ? '' : 'none';
+  });
+}
+
+// ── NTFY.SH MOBILE PUSH ───────────────────────────────────────────────────────
+function getNtfyTopic() {
+  return localStorage.getItem('ntfyTopic') || '';
+}
+
+function setNtfyTopic(topic) {
+  localStorage.setItem('ntfyTopic', topic.trim());
+}
+
+async function sendPhonePush(title, body, priority) {
+  const topic = getNtfyTopic();
+  if (!topic) return;  // silently skip if not configured
+  try {
+    await fetch('/api/notify/phone', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({topic, title, body, priority: priority || 'default'})
+    });
+  } catch(e) {}
+}
+
+async function testPhonePush() {
+  const topic = document.getElementById('ntfyTopicInput').value.trim();
+  if (!topic) { alert('Enter a topic name first'); return; }
+  setNtfyTopic(topic);
+  await sendPhonePush('✅ ContentOS Connected!', 'Your phone notifications are working. Posts will ping you here when ready.', 'high');
+  alert('Test push sent! Check your ntfy app.');
 }
 
 async function fetchFeed(url) {
@@ -1223,6 +1376,8 @@ async function fetchFeed(url) {
       return;
     }
     window._sources = items;
+    // Re-apply any active keyword/topic filter after feed refresh
+    setTimeout(applyFilter, 50);
     listEl.innerHTML = items.map((item, idx) => `
       <div class="source-item">
         <a href="${item.url}" target="_blank" rel="noopener">${escapeHtml(item.title)}</a>
@@ -1295,6 +1450,13 @@ async function oneClickCreate(idx) {
 
       // Gentle completion chime
       playChime();
+
+      // Phone push notification
+      sendPhonePush(
+        '✨ Post Ready: ' + data.title.slice(0,50),
+        'Your ' + data.platform + ' draft is staged for ' + (data.scheduled_for || 'review') + '. Open ContentOS to review and launch.',
+        'high'
+      );
     } else {
       alert('1-Click Generation failed: ' + (data.error || 'Unknown error'));
       btn.innerHTML = originalText;
@@ -2292,6 +2454,33 @@ class Handler(BaseHTTPRequestHandler):
                     wh_payload = {k: v for k, v in draft.items() if isinstance(v, (str, int, float, bool, type(None)))}
                 result = send_webhook(url, wh_payload)
                 self.send_json(result)
+                return
+
+            # Phone Push Notification (ntfy.sh)
+            if path == "/api/notify/phone":
+                topic = string_field(payload, "topic")
+                title = string_field(payload, "title") or "ContentOS Alert"
+                body = string_field(payload, "body") or "Your content is ready in ContentOS."
+                priority = string_field(payload, "priority") or "default"
+                if not topic:
+                    raise ApiError(400, "Topic is required")
+                ntfy_url = f"https://ntfy.sh/{topic.strip('/')}"
+                req = urllib.request.Request(
+                    ntfy_url,
+                    data=body.encode("utf-8"),
+                    headers={
+                        "Title": title,
+                        "Priority": priority,
+                        "Tags": "sparkles,tea",
+                        "User-Agent": "JustMeMedia-ContentOS/1.0"
+                    },
+                    method="POST"
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=5) as resp:
+                        self.send_json({"ok": True, "status": resp.status})
+                except Exception as exc:
+                    self.send_json({"ok": False, "error": str(exc)})
                 return
 
             # 1-Click Magic Pipeline
