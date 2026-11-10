@@ -2217,13 +2217,24 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             self.send_error_json(500, "Internal server error")
 
+    def address_string(self) -> str:
+        # Avoid slow reverse-DNS lookups on local loopback connections
+        return self.client_address[0]
+
     def log_message(self, fmt, *args):
         print("[ContentOS] " + (fmt % args))
 
 
 def main():
     connect_db().close()
-    server = ThreadingHTTPServer((HOST, PORT), Handler)
+    try:
+        server = ThreadingHTTPServer((HOST, PORT), Handler)
+    except OSError as e:
+        if e.errno == 48:
+            print(f"[ContentOS Error] Port {PORT} is already in use.")
+            print(f"Run 'kill -9 $(lsof -ti :{PORT})' or double-click ContentOS.command to clear it.")
+            sys.exit(1)
+        raise
     print("============================================================")
     print(f"  JustMeMedia ContentOS Running at http://{HOST}:{PORT}")
     print(f"  Local Database: {DB_PATH}")
