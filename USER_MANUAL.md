@@ -201,23 +201,33 @@ Uncheck Roundtable Mode for a direct, rapid 1-shot generation.
 
 ---
 
-### Step 4: Omni-Platform Repurposing (LinkedIn, X, YouTube)
+### Step 4: Omni-Platform Repurposing & Funnel Engine (LinkedIn, X, YouTube, Facebook)
 
-Never write for just one platform when you can write for all three at once:
+Never write for just one platform when you can orchestrate an entire omni-channel funnel at once:
 
 1. Under the post editor, locate the purple **🚀 Omni-Platform Repurposing** box.
 2. Click **Generate All Platforms**.
 3. In a single parallel run, ContentOS generates:
-   - A tailored **LinkedIn** thought-leadership post
-   - An **X Thread** (numbered breakdown)
-   - A **YouTube Brief** (title + video script/description)
-4. Click between the tabs (**LinkedIn**, **X Thread**, **YouTube**) to inspect each variation.
+   - **LinkedIn:** Executive thought-leadership post with automatic markdown formatting (clean headers, zero raw asterisks, verified links, strategic CTA).
+   - **X Thread:** Punchy 280-char maximum hook or numbered thread (`1/N`) driving curiosity back to your main hubs.
+   - **YouTube Hub:** Full comprehensive video script & description (up to 5,000 characters) featuring video title variations, 15-second opening hook, detailed chapter breakdown, and full verified resource library.
+   - **Facebook Guide:** Long-form conversational narrative post with headers, complete link library, and community discussion question.
+4. Click between the tabs (**LinkedIn**, **X Thread**, **YouTube Hub**, **Facebook Guide**) to inspect each variation.
 5. Click **Load LinkedIn** or **Load X** to bring that version directly into the primary editor.
-6. Or click **💾 Save All 3 Drafts** to immediately commit all 3 tailored versions into your approval queue with one click.
+6. Or click **💾 Save All 4 Drafts** to immediately commit all 4 tailored versions into your approval queue with optimal scheduled slots across your week.
 
 ---
 
-### Step 5: Visual Carousel Preview & Thread Splitting
+### Step 5: Agent 0 Deep Research & Verified Link Extraction
+
+ContentOS features a built-in **Agent 0: Deep Research Engine**:
+- When extracting news (e.g. Apple Developer, OpenAI, Google AI), Agent 0 doesn't just read the surface headline; it parses out all secondary links inside the source article (application portals, GitHub starter repos, API documentation, registration hubs).
+- It performs a shallow scrape on top linked resources to understand prerequisite dates, eligibility criteria, and technical submission guidelines.
+- It synthesizes a complete **360° Research Dossier** with live verified links embedded directly into the draft, so your readers get actionable links to learn more or apply immediately.
+
+---
+
+### Step 6: Visual Carousel Preview & Thread Splitting
 
 #### For LinkedIn & Instagram (Carousels)
 1. Write or generate your long-form post.
@@ -244,9 +254,10 @@ Every great post needs compelling visuals. ContentOS gives you three ways to att
 * If you have the free **Draw Things** app installed on Mac:
 * Make sure Draw Things has its API enabled (**Draw Things > Settings > API Server > Enable HTTP Server on port 7860**).
 * ContentOS will display `🟢 Draw Things Online (127.0.0.1:7860)`.
-* Click **🖼️ Draw Things (Local AI)**.
-* Your M1 Pro chip renders a high-resolution PNG image directly into your local media vault (`~/.justmemedia/contentos/media/`).
-* Click **📎 Attach to Draft** to bind the image to your post.
+* Click **🖼️ Draw Things (Local AI)** or use the 1-Click pipeline.
+* Your Mac GPU renders a high-resolution 1024x576 PNG image directly into your local media vault (`~/Library/Application Support/JustMeMedia/ContentOS/media/`).
+* **Desktop Access:** ContentOS creates an alias directly on your Mac desktop: `~/Desktop/ContentOS Media`. You can drag-and-drop generated images directly from your desktop into LinkedIn or X.
+* **Finder Reveal Button:** Every draft card with an image has a **📂 Reveal Image in Finder** button. Click it to immediately highlight the exact `.png` file in macOS Finder!
 
 #### 3. Multimodal GIF Search
 * Type keywords into the **Media Studio & GIF Search** bar (e.g. `coding`, `mind blown`, `cyberpunk`, `tech`).
@@ -255,33 +266,43 @@ Every great post needs compelling visuals. ContentOS gives you three ways to att
 
 ---
 
-### Step 7: Human Approval State Machine
+### Step 8: Human Approval State Machine & Optimal Scheduling
 
 Once your post, media, and visual prompts are ready:
 
-1. Click **💾 Save Draft**.
-2. The draft is assigned a unique ID, stamped with a timestamp, and stored in the local SQLite database.
+1. Click **💾 Save Draft** (or let 1-Click Pipeline stage it automatically).
+2. The draft is assigned a unique ID, stamped with a timestamp, assigned to the next optimal social slot (`09:00`, `14:00`, or `18:30`), and stored in the local SQLite database.
 3. The post appears in Column 3 (**Approval & Publishing Hub**).
 4. Review the draft card:
-   * **Status Pill:** Defaults to `DRAFT` (grey).
+   * **⚡ READY TO PUBLISH Launch Bar:** Located right at the top of every card. One click on `🚀 Launch to LinkedIn ↗` or `🚀 Launch to X ↗` automatically copies the post to your clipboard and opens the platform composer in a new tab!
+   * **Automatic LinkedIn Markdown Formatting:** For LinkedIn posts, ContentOS automatically cleans away raw markdown `**bold**` asterisks and transforms headers into clean, native text titles (`Key Dates:` instead of `**Key Dates**`) so your post looks 100% human-crafted and professional.
+   * **Status Pill:** Defaults to `DRAFT` (grey), changes to `APPROVED` (green) or `PUBLISHED` (blue).
    * **Action Buttons:**
-     * **📋 Copy Post:** Copies formatted text to your clipboard.
+     * **📋 Copy Text:** Copies formatted text to your clipboard.
      * **📥 Export .MD:** Downloads a standalone `.md` file with YAML frontmatter.
      * **✅ Approve:** Promotes status from `Draft` to `APPROVED` (green) and records an audit log entry in the `approvals` table.
+     * **🔔 Notify:** Sends post to Discord or Slack webhooks.
      * **Delete:** Permanently deletes the draft.
 
 ---
 
-### Step 8: Publishing to Your Social Platforms
+### Step 9: Publishing to Your Social Platforms (Desktop-to-Browser Drag & Drop)
 
-Once approved, publishing is seamless and human-supervised:
+Once approved, publishing takes under 5 seconds:
+1. On the draft card, click `🚀 Launch to LinkedIn ↗` or `🚀 Launch to X ↗`.
+2. ContentOS automatically cleans formatting, copies the post text to your clipboard, marks the post published in the database, and opens the social feed in a new browser tab.
+3. In LinkedIn or X, click the composer box and paste (`Cmd+V`).
+4. To add your visual: open the `ContentOS Media` folder on your desktop, and drag the `.png` right into the composer window for full-bleed high-resolution media!
+5. Hit **Post**!
 
-#### Manual Browser Publishing (One-Click Launchers)
-1. Click **📋 Copy Post** on the approved draft card.
-2. Click **Open LinkedIn ↗** or **Open X Composer ↗**.
-3. ContentOS opens your native social feed composer in a new tab.
-4. Paste (`Cmd+V` or `Ctrl+V`), attach your saved image/GIF, and hit Publish!
-5. Back in ContentOS, click **🚀 Mark Published** to move the status pill to `PUBLISHED` (blue).
+---
+
+### Step 10: Background Scheduled Reminder Daemon
+
+ContentOS includes an autonomous background scheduler daemon:
+* Checks drafts every 30 seconds against current time.
+* When a draft's scheduled slot arrives, ContentOS sends a **native macOS Desktop notification banner** with sound: `⏰ Time to publish '<Title>' on LinkedIn! Open ContentOS to publish!`.
+* If configured, it also fires webhook alerts to Discord/Slack so your whole team knows when content is ready to post.
 
 ---
 
@@ -415,7 +436,7 @@ Run the built-in test suite at any time from the project root:
 ```bash
 PYTHONPATH=. python3 -B -m unittest -v tests/test_server.py
 ```
-All **20/20 unit tests** will execute and verify database schema, security headers, anti-slop filters, viral hooks, thread formatters, carousel generators, and webhook builders.
+All **25/25 unit tests** will execute and verify database schema, security headers, anti-slop filters, viral hooks, thread formatters, carousel generators, webhook builders, Deep Research dossiers, and LinkedIn markdown formatters.
 
 ---
 

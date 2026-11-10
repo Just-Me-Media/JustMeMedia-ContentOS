@@ -861,6 +861,8 @@ def run_roundtable(provider_id: str, title: str, context: str, platform: str, to
     # Phase B: Apply Anti-Slop filter + Viral hook injection
     final_post_clean = strip_ai_slop(final_post_raw)
     final_post = inject_viral_hook(final_post_clean, title)
+    if platform.lower() == "linkedin":
+        final_post = format_for_linkedin(final_post)
 
     # Agent 4: Art Director (Image prompt)
     art_sys = "You are an elite Visual Art Director creating photorealistic, modern image briefs."
@@ -1000,6 +1002,31 @@ def format_as_carousel(title: str, post_text: str) -> list[dict]:
         slides.append({"slide": i, "heading": heading, "body": body})
     slides.append({"slide": len(slides) + 1, "heading": "TAKEAWAY", "body": "Follow @JustMeMedia for daily cutting-edge insights."})
     return slides
+
+
+def format_for_linkedin(text: str) -> str:
+    """Format post text specifically for LinkedIn:
+    - LinkedIn composer does not render raw markdown bold (**text**) or italics (*text*).
+    - Convert bold section headers (e.g. **Key Dates** or ### Key Dates) into clean titles with colons.
+    - Clean inline asterisks from **bold** and *italic* phrases.
+    - Preserve emojis, bullet points, numbering, and URLs.
+    """
+    if not text:
+        return ""
+    lines = []
+    for line in text.split("\n"):
+        s = line.strip()
+        if s.startswith("### "):
+            clean_title = s[4:].strip().replace("**", "").replace("*", "")
+            lines.append(f"{clean_title}:" if not clean_title.endswith(":") else clean_title)
+        elif s.startswith("**") and s.endswith("**") and len(s) > 4 and "\n" not in s:
+            clean_title = s[2:-2].strip()
+            lines.append(f"{clean_title}:" if not clean_title.endswith(":") else clean_title)
+        else:
+            cleaned = re.sub(r"\*\*(.*?)\*\*", r"\1", line)
+            cleaned = re.sub(r"(?<!\*)\*(?!\*)(.*?)(?<!\*)\*(?!\*)", r"\1", cleaned)
+            lines.append(cleaned)
+    return "\n".join(lines)
 
 
 def search_gifs(query: str, limit: int = 6) -> list[dict]:
@@ -1803,10 +1830,30 @@ async function updateDraftSchedule(id, slot) {
   loadDrafts();
 }
 
+function cleanMarkdownForSocial(str) {
+  if (!str) return '';
+  return str.split('\n').map(line => {
+    let s = line.trim();
+    if (s.startsWith('### ')) {
+      let t = s.slice(4).replace(/\*\*/g, '').trim();
+      return t.endsWith(':') ? t : t + ':';
+    }
+    if (s.startsWith('**') && s.endsWith('**') && s.length > 4 && !s.slice(2, -2).includes('\n')) {
+      let t = s.slice(2, -2).trim();
+      return t.endsWith(':') ? t : t + ':';
+    }
+    return line.replace(/\*\*(.*?)\*\*/g, '$1').replace(/(^|[^*])\*(?!\*)(.*?)\*(?!\*)/g, '$1$2');
+  }).join('\n');
+}
+
 function copyAndLaunch(id, url) {
   const d = (window._drafts || {})[id];
   if (!d) return;
-  copyText(d.body);
+  let text = d.body;
+  if (d.platform === 'LinkedIn') {
+    text = cleanMarkdownForSocial(text);
+  }
+  copyText(text);
   window.open(url, '_blank');
   markPublished(id);
 }
@@ -2171,7 +2218,12 @@ async function loadDrafts() {
 
 function copyDraftText(id) {
   const d = (window._drafts || {})[id];
-  if (d && d.body) copyText(d.body);
+  if (!d || !d.body) return;
+  let text = d.body;
+  if (d.platform === 'LinkedIn') {
+    text = cleanMarkdownForSocial(text);
+  }
+  copyText(text);
 }
 
 function copyPromptText(id) {
@@ -2955,6 +3007,8 @@ class Handler(BaseHTTPRequestHandler):
                             "Return ONLY the post content."
                         )
                         draft_text = call_ai(provider, user_prompt, system_prompt)
+                        if platform.lower() == "linkedin":
+                            draft_text = format_for_linkedin(draft_text)
                         img_prompt_request = (
                             f"Create a photorealistic, modern visual prompt to accompany this post for JustMeMedia.\n"
                             f"Post context: {title} - {draft_text[:200]}\n"

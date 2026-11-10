@@ -273,6 +273,30 @@ class TestPhasesAtoE(unittest.TestCase):
         self.assertEqual(res["title"], "AI Revolution")
         self.assertIn("Local AI models run on Apple Silicon", res["dossier"])
 
+    def test_format_for_linkedin(self):
+        from app.server import format_for_linkedin
+        raw = (
+            "🚀 Ready to shape the next wave? The **Swift Student Challenge 2027** is here.\n\n"
+            "**Key Dates**\n"
+            "• **February 8–28, 2027** (UTC) – submission window\n\n"
+            "### Evaluation Criteria\n"
+            "- A functional app built with **Swift** for any Apple platform\n"
+            "🔗 **Learn more & apply here:** https://developer.apple.com\n\n"
+            "*Which Apple platform will you build for?*\n"
+            "#Swift #AppleDev"
+        )
+        cleaned = format_for_linkedin(raw)
+        self.assertNotIn("**Key Dates**", cleaned)
+        self.assertIn("Key Dates:", cleaned)
+        self.assertNotIn("### Evaluation Criteria", cleaned)
+        self.assertIn("Evaluation Criteria:", cleaned)
+        self.assertNotIn("**Swift**", cleaned)
+        self.assertIn("built with Swift for any", cleaned)
+        self.assertNotIn("*Which Apple platform", cleaned)
+        self.assertIn("Which Apple platform will you build for?", cleaned)
+        self.assertIn("https://developer.apple.com", cleaned)
+        self.assertIn("#Swift", cleaned)
+
 
 if __name__ == "__main__":
     unittest.main()
