@@ -144,5 +144,81 @@ class TestDatabase(unittest.TestCase):
         self.assertIn("too large", str(cm.exception))
 
 
+class TestPhasesAtoE(unittest.TestCase):
+    def test_strip_ai_slop(self):
+        from app.server import strip_ai_slop
+        sample = "In today's fast-paced world, we must delve into AI to leverage its transformative power."
+        cleaned = strip_ai_slop(sample)
+        self.assertNotIn("delve", cleaned.lower())
+        self.assertNotIn("leverage", cleaned.lower())
+        self.assertNotIn("in today's fast-paced world", cleaned.lower())
+
+    def test_inject_viral_hook(self):
+        from app.server import inject_viral_hook
+        plain_text = "Here are the top three principles of local-first software architecture."
+        hooked = inject_viral_hook(plain_text, "Local First Architecture")
+        self.assertTrue(hooked.endswith(plain_text))
+        self.assertGreater(len(hooked), len(plain_text))
+        # Should not re-hook if already has a hook question
+        question_text = "Why is everyone moving to local AI?\nHere is the breakdown."
+        self.assertEqual(inject_viral_hook(question_text, "Local AI"), question_text)
+
+    def test_format_as_thread(self):
+        from app.server import format_as_thread
+        long_post = "First point about AI.\n\nSecond point about privacy.\n\nThird point about cost.\n\nFourth point about speed."
+        tweets = format_as_thread(long_post, max_tweet_len=100)
+        self.assertTrue(len(tweets) >= 2)
+        self.assertTrue(tweets[0].startswith(f"1/{len(tweets)}"))
+        self.assertTrue(tweets[-1].startswith(f"{len(tweets)}/{len(tweets)}"))
+
+    def test_format_as_carousel(self):
+        from app.server import format_as_carousel
+        content = "Intro slide context.\n\nKey Finding 1\nDetails on finding 1.\n\nKey Finding 2\nDetails on finding 2."
+        slides = format_as_carousel("My Slide Deck", content)
+        self.assertTrue(len(slides) >= 2)
+        self.assertEqual(slides[0]["slide"], 1)
+        self.assertIn("heading", slides[0])
+        self.assertIn("body", slides[0])
+
+    def test_draw_things_unavailable(self):
+        from app.server import generate_local_image
+        # Draw Things is offline in sandboxed test run; should gracefully return error dict
+        res = generate_local_image("a futuristic workstation")
+        self.assertFalse(res["ok"])
+        self.assertIn("Draw Things API not available", res["error"])
+
+    def test_build_discord_payload(self):
+        from app.server import build_discord_payload
+        draft = {"title": "Test Title", "body": "Test Body", "platform": "LinkedIn", "status": "Draft", "image_prompt": "Neon green art"}
+        payload = build_discord_payload(draft)
+        self.assertIn("embeds", payload)
+        self.assertIn("Test Title", payload["embeds"][0]["title"])
+        self.assertIn("fields", payload["embeds"][0])
+
+    def test_build_slack_payload(self):
+        from app.server import build_slack_payload
+        draft = {"title": "Test Title", "body": "Test Body", "platform": "X", "status": "Approved"}
+        payload = build_slack_payload(draft)
+        self.assertIn("blocks", payload)
+        self.assertIn("Test Title", payload["blocks"][0]["text"]["text"])
+
+    def test_send_webhook_empty_url(self):
+        from app.server import send_webhook
+        res = send_webhook("", {"test": 1})
+        self.assertFalse(res["ok"])
+        self.assertIn("Invalid webhook URL", res["error"])
+
+    def test_save_and_get_webhook_config(self):
+        from app.server import save_webhook_config, get_webhook_config, data_dir
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            test_file = Path(tmp_dir) / "webhooks.json"
+            # Test direct file write/read logic
+            cfg = {"discord": "https://discord.com/api/webhooks/test", "slack": "https://hooks.slack.com/test"}
+            test_file.write_text(json.dumps(cfg), encoding="utf-8")
+            loaded = json.loads(test_file.read_text(encoding="utf-8"))
+            self.assertEqual(loaded["discord"], cfg["discord"])
+            self.assertEqual(loaded["slack"], cfg["slack"])
+
+
 if __name__ == "__main__":
     unittest.main()

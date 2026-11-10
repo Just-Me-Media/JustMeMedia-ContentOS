@@ -7,8 +7,10 @@ Dual-host compatible: Windows (ThinkCentre) and macOS (M1 Pro).
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
+import random
 import re
 import sqlite3
 import sys
@@ -231,6 +233,240 @@ def db() -> Iterator[sqlite3.Connection]:
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PHASE B: VIRAL HOOK LIBRARY + ANTI-SLOP FILTER
+# ─────────────────────────────────────────────────────────────────────────────
+
+VIRAL_HOOK_TEMPLATES = [
+    "Most {industry} experts focus on {X}. The top 1% focus on {Y}.",
+    "I analyzed {N} {things} so you don't have to. Here's what actually matters:",
+    "Unpopular opinion: {contrarian_take}.",
+    "Nobody talks about this {topic} problem. But it's costing businesses millions.",
+    "The {industry} playbook everyone uses is broken. Here's what actually works:",
+    "Stop doing {bad_practice}. Start doing {good_practice}.",
+    "{Number} years from now, {prediction}. Here's the data showing why:",
+    "Hot take: {bold_claim}. Here's my reasoning:",
+    "The {tool/strategy} everyone ignores is the one that changes everything.",
+    "If I were starting {endeavor} today, I'd do exactly {action}. Here's why:",
+]
+
+AI_SLOP_PATTERNS = re.compile(
+    r"\b(delve|delving|tapestry|testament|revolutionize|revolutionizing|game.?changer|"
+    r"game.?changing|unleash|unleashing|unprecedented|groundbreaking|leverage|leveraging|"
+    r"spearhead|spearheading|synergies|synergy|paradigm|holistic|robust|utilize|utilizing|"
+    r"scalable|scalability|transformative|innovative solutions|cutting.?edge solutions|"
+    r"best.?in.?class|world.?class|state.?of.?the.?art|next.?generation|thought leader|"
+    r"ecosystem|empower|empowering|foster|fostering|seamless|streamline|streamlining|"
+    r"exciting opportunities|dive deep|deep dive|circle back|at the end of the day|"
+    r"move the needle|low.?hanging fruit|boil the ocean|think outside the box|"
+    r"value.?add|value proposition|bleeding edge|disruptive|disruptors|pivot|pivoting)\b",
+    re.IGNORECASE
+)
+
+SLOP_REPLACEMENTS = {
+    r"\bin today's (?:fast-paced|rapidly evolving|digital|modern) world\b": "today",
+    r"\bin the modern era\b": "today",
+    r"\bdelve\b": "explore", r"\bdelving\b": "exploring",
+    r"\btapestry\b": "mix", r"\btestament\b": "proof",
+    r"\bunprecedented\b": "new", r"\bgroundbreaking\b": "notable",
+    r"\bleverag\w+\b": "use", r"\butiliz\w+\b": "use",
+    r"\bsynergi\w+\b": "collaboration", r"\bholistic\b": "complete",
+    r"\brobust\b": "strong", r"\bscalabl\w+\b": "scalable",
+    r"\btransformative\b": "impactful", r"\bempow\w+\b": "enable",
+    r"\bfost\w+\b": "build", r"\bseamless\b": "smooth",
+    r"\bstreamlin\w+\b": "simplify", r"\bdisruptiv\w+\b": "new",
+}
+
+
+def strip_ai_slop(text: str) -> str:
+    """Remove AI clichés and replace with cleaner alternatives."""
+    result = text
+    for pattern, replacement in SLOP_REPLACEMENTS.items():
+        result = re.sub(pattern, replacement, result, flags=re.IGNORECASE)
+    return result
+
+
+def inject_viral_hook(text: str, title: str) -> str:
+    """Prepend a viral hook pattern if the post doesn't already have a strong opener."""
+    first_line = text.split("\n")[0].strip()
+    # Already has a strong hook if it starts with a question or bold statement
+    if first_line.endswith("?") or first_line.startswith(("🔥", "⚡", "💡", "🚀", "❌", "✅")):
+        return text
+    # Choose a random hook template and inject
+    hook = random.choice(VIRAL_HOOK_TEMPLATES[:5])
+    # Simple fill with title keywords
+    words = title.split()
+    topic = " ".join(words[:3]) if words else "this"
+    filled = hook.replace("{topic}", topic).replace("{industry}", "tech").replace(
+        "{X}", "output").replace("{Y}", "systems").replace(
+        "{N}", "100").replace("{things}", "examples").replace(
+        "{contrarian_take}", f"{topic} needs rethinking").replace(
+        "{Number}", "5").replace("{prediction}", "this changes everything").replace(
+        "{bold_claim}", f"{topic} is fundamentally misunderstood").replace(
+        "{tool/strategy}", topic).replace("{bad_practice}", "shortcuts").replace(
+        "{good_practice}", "fundamentals").replace("{endeavor}", topic).replace(
+        "{action}", "focus on the basics")
+    return filled + "\n\n" + text
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PHASE C: LOCAL DRAW THINGS IMAGE GENERATION (AUTOMATIC1111-COMPATIBLE API)
+# ─────────────────────────────────────────────────────────────────────────────
+
+DRAW_THINGS_URL = os.environ.get("DRAW_THINGS_URL", "http://127.0.0.1:7860")
+MEDIA_DIR = data_dir() / "media"
+MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def draw_things_available() -> bool:
+    """Check if Draw Things local API server is running."""
+    try:
+        req = urllib.request.Request(DRAW_THINGS_URL + "/sdapi/v1/sd-models",
+                                     headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
+def generate_local_image(prompt: str, negative_prompt: str = "", width: int = 1024,
+                          height: int = 576, steps: int = 20) -> dict:
+    """Generate an image via Draw Things local HTTP API (AUTOMATIC1111-compatible).
+
+    Returns {"ok": True, "filename": "...", "b64": "..."} on success,
+            {"ok": False, "error": "..."} on failure.
+    """
+    if not draw_things_available():
+        return {"ok": False, "error": "Draw Things API not available. Enable HTTP server in Draw Things Settings."}
+
+    payload = {
+        "prompt": prompt,
+        "negative_prompt": negative_prompt or "blurry, low quality, watermark, text, logo, oversaturated",
+        "width": width,
+        "height": height,
+        "steps": steps,
+        "cfg_scale": 7.0,
+        "seed": -1,
+        "sampler_name": "DPM++ 2M Karras",
+    }
+    try:
+        req = urllib.request.Request(
+            DRAW_THINGS_URL + "/sdapi/v1/txt2img",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"}
+        )
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+
+        images = data.get("images", [])
+        if not images:
+            return {"ok": False, "error": "Draw Things returned no images."}
+
+        b64_data = images[0]
+        import base64
+        filename = f"gen_{now_iso()[:19].replace(':', '-').replace('T', '_')}.png"
+        filepath = MEDIA_DIR / filename
+        filepath.write_bytes(base64.b64decode(b64_data))
+
+        return {"ok": True, "filename": filename, "b64": b64_data}
+
+    except urllib.error.URLError as exc:
+        return {"ok": False, "error": f"Cannot connect to Draw Things: {exc}"}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PHASE E: WEBHOOK DISPATCHER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def send_webhook(webhook_url: str, payload: dict) -> dict:
+    """Send a JSON payload to any webhook URL (Discord, Slack, Zapier, Make, n8n)."""
+    if not webhook_url or not webhook_url.startswith("http"):
+        return {"ok": False, "error": "Invalid webhook URL"}
+    try:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            webhook_url,
+            data=data,
+            headers={"Content-Type": "application/json", "User-Agent": "JustMeMediaContentOS/2.0"}
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            status = resp.status
+            body = resp.read().decode("utf-8", errors="ignore")
+        return {"ok": True, "status": status, "response": body[:200]}
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="ignore")
+        return {"ok": False, "error": f"HTTP {exc.code}: {body[:200]}"}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def build_discord_payload(draft: dict) -> dict:
+    """Format a draft as a Discord embed message."""
+    platform_colors = {"LinkedIn": 0x0A66C2, "X": 0x000000, "Instagram": 0xE1306C,
+                        "YouTube": 0xFF0000, "General": 0x48bb78}
+    color = platform_colors.get(draft.get("platform", "General"), 0x48bb78)
+    body_preview = (draft.get("body", "") or "")[:900]
+    if len(draft.get("body", "")) > 900:
+        body_preview += "..."
+
+    embed = {
+        "title": f"📝 New Draft: {draft.get('title', 'Untitled')[:200]}",
+        "description": body_preview,
+        "color": color,
+        "fields": [
+            {"name": "Platform", "value": draft.get("platform", "General"), "inline": True},
+            {"name": "Status", "value": draft.get("status", "Draft"), "inline": True},
+            {"name": "Created", "value": (draft.get("created_at", "") or "")[:10], "inline": True},
+        ],
+        "footer": {"text": "JustMeMedia ContentOS · Approve at http://127.0.0.1:8765"}
+    }
+    if draft.get("image_prompt"):
+        embed["fields"].append({"name": "🎨 Visual Brief", "value": draft["image_prompt"][:200], "inline": False})
+
+    return {"embeds": [embed]}
+
+
+def build_slack_payload(draft: dict) -> dict:
+    """Format a draft as a Slack block message."""
+    body_preview = (draft.get("body", "") or "")[:700]
+    return {
+        "blocks": [
+            {"type": "header", "text": {"type": "plain_text", "text": f"📝 New Draft Ready: {draft.get('title', '')[:60]}"}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": body_preview}},
+            {"type": "context", "elements": [
+                {"type": "mrkdwn", "text": f"*Platform:* {draft.get('platform', 'General')} | *Status:* {draft.get('status', 'Draft')} | <http://127.0.0.1:8765|Open ContentOS>"}
+            ]}
+        ]
+    }
+
+
+def get_webhook_config() -> dict:
+    """Load webhook URLs from environment or config file."""
+    config_file = data_dir() / "webhooks.json"
+    config = {}
+    if config_file.exists():
+        try:
+            config = json.loads(config_file.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    # Env vars override file config
+    if os.environ.get("DISCORD_WEBHOOK_URL"):
+        config["discord"] = os.environ["DISCORD_WEBHOOK_URL"]
+    if os.environ.get("SLACK_WEBHOOK_URL"):
+        config["slack"] = os.environ["SLACK_WEBHOOK_URL"]
+    if os.environ.get("CUSTOM_WEBHOOK_URL"):
+        config["custom"] = os.environ["CUSTOM_WEBHOOK_URL"]
+    return config
+
+
+def save_webhook_config(config: dict) -> None:
+    """Persist webhook URLs to local config file."""
+    config_file = data_dir() / "webhooks.json"
+    config_file.write_text(json.dumps(config, indent=2), encoding="utf-8")
 
 
 class ApiError(Exception):
@@ -469,7 +705,11 @@ def run_roundtable(provider_id: str, title: str, context: str, platform: str, to
         f"Target platform: {platform}.\n"
         "Return ONLY the final, ready-to-post text."
     )
-    final_post = call_ai(provider_id, hook_prompt, hook_sys)
+    final_post_raw = call_ai(provider_id, hook_prompt, hook_sys)
+
+    # Phase B: Apply Anti-Slop filter + Viral hook injection
+    final_post_clean = strip_ai_slop(final_post_raw)
+    final_post = inject_viral_hook(final_post_clean, title)
 
     # Agent 4: Art Director (Image prompt)
     art_sys = "You are an elite Visual Art Director creating photorealistic, modern image briefs."
@@ -485,7 +725,7 @@ def run_roundtable(provider_id: str, title: str, context: str, platform: str, to
     return {
         "final_post": final_post,
         "image_prompt": image_prompt,
-        "roundtable_log": f"Agent 1 (Drafter - {tone}) ➔ Agent 2 (Fact-Checker) ➔ Agent 3 (Hook Optimizer) ➔ Agent 4 (Art Director)"
+        "roundtable_log": f"Agent 1 (Drafter - {tone}) ➔ Agent 2 (Fact-Checker) ➔ Agent 3 (Hook+AntiSlop) ➔ Agent 4 (Art Director)"
     }
 
 
@@ -626,6 +866,19 @@ textarea{min-height:160px;resize:vertical;font-family:inherit}
 .gif-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:8px;max-height:160px;overflow-y:auto}
 .gif-grid img{width:100%;height:75px;object-fit:cover;border-radius:4px;cursor:pointer;border:1px solid transparent}
 .gif-grid img:hover{border-color:var(--accent)}
+.carousel-preview{background:var(--panel-alt);border:1px solid var(--line);border-radius:8px;padding:12px;margin-top:10px}
+.carousel-slide{background:#0c120e;border:1px solid var(--accent);border-radius:6px;padding:12px;margin-bottom:8px}
+.carousel-slide-num{font-size:10px;color:var(--accent);font-weight:700;text-transform:uppercase;margin-bottom:4px}
+.carousel-slide h4{margin:0 0 6px;font-size:14px;color:#fff}
+.carousel-slide p{margin:0;font-size:12px;color:var(--muted);white-space:pre-wrap}
+.webhook-row{display:flex;gap:8px;margin-top:6px;align-items:center}
+.draw-things-status{font-size:11px;padding:3px 8px;border-radius:4px;display:inline-block}
+.dt-online{background:#22543d;color:#9ae6b4}
+.dt-offline{background:#742a2a;color:#feb2b2}
+.omni-bundle{background:var(--panel-alt);border:1px solid var(--purple);border-radius:8px;padding:12px;margin-top:10px}
+.omni-platform-tab{padding:6px 12px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;border:1px solid var(--line);background:transparent;color:var(--muted)}
+.omni-platform-tab.active{background:var(--accent);color:#08130b;border-color:var(--accent)}
+.omni-tab-content{background:#0c120e;border:1px solid #354a3e;border-radius:6px;padding:10px;margin-top:6px;font-size:12px;color:#d2ded5;white-space:pre-wrap;max-height:180px;overflow-y:auto}
 </style>
 </head>
 <body>
@@ -708,9 +961,15 @@ textarea{min-height:160px;resize:vertical;font-family:inherit}
       <span style="font-size:11px;color:var(--muted)">Drafter ➔ Fact-Checker ➔ Hook Optimizer</span>
     </div>
 
-    <div style="display:flex;gap:8px;margin-top:10px">
+    <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
       <button id="btnAiDraft" class="btn btn-secondary" onclick="generateAiDraft()">⚡ Generate Post</button>
       <button id="btnAiVisual" class="btn btn-secondary" onclick="generateImagePrompt()">🎨 Suggest Image Prompt</button>
+      <button id="btnGenImage" class="btn btn-secondary" onclick="generateLocalImage()">🖼️ Draw Things (Local AI)</button>
+    </div>
+    <div id="dtStatus" style="margin-top:4px;font-size:11px;color:var(--muted)">Checking Draw Things…</div>
+    <div id="generatedImagePreview" style="margin-top:8px;display:none">
+      <img id="generatedImg" style="width:100%;border-radius:6px;border:1px solid var(--line)" alt="Generated image">
+      <button class="btn btn-secondary btn-small" style="margin-top:4px" onclick="attachGeneratedImage()">📎 Attach to Draft</button>
     </div>
     
     <label for="draftBody" style="margin-top:12px">Post Body & Formatting</label>
@@ -721,6 +980,40 @@ textarea{min-height:160px;resize:vertical;font-family:inherit}
         <button class="btn btn-secondary btn-small" onclick="formatCarousel()">📑 Split Carousel</button>
       </div>
       <div id="charCounter" class="char-counter" style="margin-top:0">0 characters</div>
+    </div>
+
+    <!-- PHASE D: CAROUSEL VISUAL SLIDE PREVIEW -->
+    <div id="carouselPreview" class="carousel-preview" style="display:none">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <label style="margin:0">📑 Carousel Slide Preview</label>
+        <button class="btn btn-small btn-secondary" onclick="document.getElementById('carouselPreview').style.display='none'">✕</button>
+      </div>
+      <div id="carouselSlides"></div>
+    </div>
+
+    <!-- PHASE A: OMNI-PLATFORM REPURPOSING BUNDLE -->
+    <div class="omni-bundle" style="margin-top:12px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <label style="margin:0;color:var(--purple)">🚀 Omni-Platform Repurposing</label>
+        <button id="btnOmni" class="btn btn-purple btn-small" onclick="generateOmniBundle()">Generate All Platforms</button>
+      </div>
+      <p style="margin:4px 0 8px;font-size:11px;color:var(--muted)">1 story ➔ LinkedIn post + X Thread + YouTube Brief simultaneously</p>
+      <div id="omniBundleTabs" style="display:none">
+        <div style="display:flex;gap:6px;margin-bottom:8px">
+          <button class="omni-platform-tab active" onclick="showOmniTab('linkedin', this)">LinkedIn</button>
+          <button class="omni-platform-tab" onclick="showOmniTab('x', this)">X Thread</button>
+          <button class="omni-platform-tab" onclick="showOmniTab('youtube', this)">YouTube</button>
+        </div>
+        <div id="omniLinkedin" class="omni-tab-content"></div>
+        <div id="omniX" class="omni-tab-content" style="display:none"></div>
+        <div id="omniYoutube" class="omni-tab-content" style="display:none"></div>
+        <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
+          <button class="btn btn-small btn-secondary" onclick="loadOmniToDraft('linkedin')">Load LinkedIn</button>
+          <button class="btn btn-small btn-secondary" onclick="loadOmniToDraft('x')">Load X</button>
+          <button class="btn btn-small btn-secondary" onclick="loadOmniToDraft('youtube')">Load YouTube</button>
+          <button class="btn btn-small" onclick="saveOmniBundle()">💾 Save All 3 Drafts</button>
+        </div>
+      </div>
     </div>
 
     <!-- MULTIMODAL MEDIA STUDIO (GIF SEARCH & VISUAL PROMPTS) -->
@@ -755,9 +1048,33 @@ textarea{min-height:160px;resize:vertical;font-family:inherit}
   <section>
     <h2>3. Approval & Publishing Hub</h2>
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-      <label style="margin:0">Saved Drafts & Queue</label>
-      <span id="queueCount" style="font-size:11px;color:var(--muted)">0 items</span>
+      <div style="display:flex;gap:6px;align-items:center">
+        <label style="margin:0">Saved Drafts & Queue</label>
+        <span id="queueCount" style="font-size:11px;color:var(--muted)">0 items</span>
+      </div>
+      <button class="btn btn-secondary btn-small" onclick="toggleWebhookSettings()">⚙️ Webhooks</button>
     </div>
+
+    <!-- PHASE E: WEBHOOK SETTINGS PANEL -->
+    <div id="webhookSettings" style="display:none;background:var(--panel-alt);border:1px solid var(--line);border-radius:6px;padding:10px;margin-bottom:10px">
+      <label style="font-size:11px">Discord Webhook</label>
+      <div class="webhook-row">
+        <input id="discordWebhook" placeholder="https://discord.com/api/webhooks/...">
+        <button class="btn btn-small btn-secondary" onclick="testWebhook('discord')">Test</button>
+      </div>
+      <label style="font-size:11px;margin-top:6px">Slack Webhook</label>
+      <div class="webhook-row">
+        <input id="slackWebhook" placeholder="https://hooks.slack.com/services/...">
+        <button class="btn btn-small btn-secondary" onclick="testWebhook('slack')">Test</button>
+      </div>
+      <label style="font-size:11px;margin-top:6px">Custom Webhook (n8n/Zapier)</label>
+      <div class="webhook-row">
+        <input id="customWebhook" placeholder="https://...">
+        <button class="btn btn-small btn-secondary" onclick="testWebhook('custom')">Test</button>
+      </div>
+      <button class="btn btn-small" style="margin-top:8px" onclick="saveWebhooks()">Save Webhook URLs</button>
+    </div>
+
     <div id="draftsQueue" style="flex:1;overflow-y:auto;max-height:680px">Loading drafts…</div>
   </section>
 </main>
@@ -927,6 +1244,16 @@ async function formatCarousel() {
       document.getElementById('draftBody').value = formatted;
       document.getElementById('draftPlatform').value = 'LinkedIn';
       updateCharCount();
+      // Render Phase D Visual Slide Preview
+      const slidesEl = document.getElementById('carouselSlides');
+      slidesEl.innerHTML = data.slides.map(s => `
+        <div class="carousel-slide">
+          <div class="carousel-slide-num">Slide ${s.slide} of ${data.slides.length}</div>
+          <h4>${escapeHtml(s.heading)}</h4>
+          <p>${escapeHtml(s.body)}</p>
+        </div>
+      `).join('');
+      document.getElementById('carouselPreview').style.display = 'block';
     }
   } catch (e) {
     alert('Failed to format carousel.');
@@ -1108,6 +1435,7 @@ async function loadDrafts() {
           ` : `
             <button class="btn btn-secondary btn-small" style="color:#bee3f8" onclick="markPublished(${d.id})">🚀 Mark Published</button>
           `}
+          <button class="btn btn-secondary btn-small" onclick="notifyDraft(${d.id})">🔔 Notify</button>
           <button class="btn btn-danger btn-small" onclick="deleteDraft(${d.id})">Delete</button>
         </div>
 
@@ -1131,12 +1459,12 @@ function copyPromptText(id) {
 }
 
 async function approveDraft(id) {
-  await fetch(`/api/drafts/${id}/approve`, {method: 'POST'});
+  await fetch(`/api/drafts/${id}/approve`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'});
   loadDrafts();
 }
 
 async function markPublished(id) {
-  await fetch(`/api/drafts/${id}/publish`, {method: 'POST'});
+  await fetch(`/api/drafts/${id}/publish`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'});
   loadDrafts();
 }
 
@@ -1168,10 +1496,172 @@ function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// PHASE A: OMNI-PLATFORM REPURPOSING
+// ─────────────────────────────────────────────────────────────────────────────
+let _omniBundle = {};
+async function generateOmniBundle() {
+  const title = document.getElementById('draftTitle').value.trim();
+  const context = document.getElementById('draftBody').value.trim();
+  const provider = document.getElementById('aiProvider').value;
+  const tone = document.getElementById('draftTone').value;
+  if (!title && !context) { alert('Enter a title or article text first.'); return; }
+  const btn = document.getElementById('btnOmni');
+  btn.disabled = true; btn.textContent = '⏳ Repurposing All 3…';
+  try {
+    const [liRes, xRes, ytRes] = await Promise.all([
+      fetch('/api/generate', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({task:'roundtable', title, context, platform:'LinkedIn', tone, provider})}),
+      fetch('/api/generate', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({task:'draft_post', title, context, platform:'X', tone, provider})}),
+      fetch('/api/generate', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({task:'draft_post', title, context, platform:'YouTube', tone, provider})}),
+    ]);
+    const [liData, xData, ytData] = await Promise.all([liRes.json(), xRes.json(), ytRes.json()]);
+    _omniBundle = {
+      linkedin: liData.ok ? liData.result : 'Error: ' + liData.error,
+      x: xData.ok ? xData.result : 'Error: ' + xData.error,
+      youtube: ytData.ok ? ytData.result : 'Error: ' + ytData.error,
+      image_prompt: liData.image_prompt || ''
+    };
+    document.getElementById('omniLinkedin').textContent = _omniBundle.linkedin;
+    document.getElementById('omniX').textContent = _omniBundle.x;
+    document.getElementById('omniYoutube').textContent = _omniBundle.youtube;
+    document.getElementById('omniBundleTabs').style.display = 'block';
+    if (liData.image_prompt) document.getElementById('draftImagePrompt').value = liData.image_prompt;
+  } catch(e) { alert('Omni-bundle generation failed: ' + e); }
+  finally { btn.disabled = false; btn.textContent = 'Generate All Platforms'; }
+}
+
+function showOmniTab(tab, el) {
+  ['linkedin','x','youtube'].forEach(t => {
+    document.getElementById('omni' + t.charAt(0).toUpperCase() + t.slice(1)).style.display = t === tab ? 'block' : 'none';
+  });
+  document.querySelectorAll('.omni-platform-tab').forEach(b => b.classList.remove('active'));
+  el.classList.add('active');
+}
+
+function loadOmniToDraft(tab) {
+  const text = _omniBundle[tab];
+  if (!text) return;
+  document.getElementById('draftBody').value = text;
+  document.getElementById('draftPlatform').value = tab === 'x' ? 'X' : (tab === 'youtube' ? 'YouTube' : 'LinkedIn');
+  updateCharCount();
+}
+
+async function saveOmniBundle() {
+  if (!_omniBundle.linkedin) { alert('Generate bundle first.'); return; }
+  const title = document.getElementById('draftTitle').value.trim() || 'Omni Bundle';
+  const platforms = [{key:'linkedin', platform:'LinkedIn'}, {key:'x', platform:'X'}, {key:'youtube', platform:'YouTube'}];
+  for (const p of platforms) {
+    await fetch('/api/drafts', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({title: `${title} (${p.platform})`, body: _omniBundle[p.key], platform: p.platform,
+        image_prompt: _omniBundle.image_prompt || '', source_url: '', media_url: ''})
+    });
+  }
+  alert('✅ Saved 3 platform drafts to queue!');
+  loadDrafts();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PHASE C: DRAW THINGS LOCAL IMAGE GENERATION
+// ─────────────────────────────────────────────────────────────────────────────
+let _generatedImageFilename = '';
+async function checkDrawThingsStatus() {
+  try {
+    const res = await fetch('/api/draw-things-status');
+    const data = await res.json();
+    const el = document.getElementById('dtStatus');
+    if (data.available) {
+      el.innerHTML = '<span class="draw-things-status dt-online">🟢 Draw Things Online (127.0.0.1:7860)</span>';
+    } else {
+      el.innerHTML = '<span class="draw-things-status dt-offline">🔴 Draw Things Offline (enable API in Mac App Settings)</span>';
+    }
+  } catch(e) {}
+}
+
+async function generateLocalImage() {
+  const prompt = document.getElementById('draftImagePrompt').value.trim();
+  if (!prompt) { alert('Generate or enter a visual prompt first.'); return; }
+  const btn = document.getElementById('btnGenImage');
+  btn.disabled = true; btn.textContent = '⏳ Generating…';
+  try {
+    const res = await fetch('/api/generate-image', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({prompt, width: 1024, height: 576, steps: 20})
+    });
+    const data = await res.json();
+    if (data.ok) {
+      _generatedImageFilename = data.filename;
+      document.getElementById('generatedImg').src = `/api/media/${data.filename}`;
+      document.getElementById('generatedImagePreview').style.display = 'block';
+    } else {
+      alert('Draw Things image generation: ' + data.error);
+    }
+  } catch(e) { alert('Failed to connect to Draw Things API: ' + e); }
+  finally { btn.disabled = false; btn.textContent = '🖼️ Draw Things (Local AI)'; }
+}
+
+function attachGeneratedImage() {
+  if (!_generatedImageFilename) return;
+  const url = `/api/media/${_generatedImageFilename}`;
+  document.getElementById('draftMediaUrl').value = url;
+  document.getElementById('attachedMediaUrl').textContent = _generatedImageFilename;
+  document.getElementById('attachedMediaPreview').style.display = 'block';
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PHASE E: WEBHOOKS
+// ─────────────────────────────────────────────────────────────────────────────
+function toggleWebhookSettings() {
+  const el = document.getElementById('webhookSettings');
+  el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+
+async function saveWebhooks() {
+  const discord = document.getElementById('discordWebhook').value.trim();
+  const slack = document.getElementById('slackWebhook').value.trim();
+  const custom = document.getElementById('customWebhook').value.trim();
+  const res = await fetch('/api/webhooks/save', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({discord, slack, custom})
+  });
+  const data = await res.json();
+  alert(data.ok ? '✅ Webhook URLs saved!' : 'Error: ' + data.error);
+}
+
+async function testWebhook(target) {
+  const res = await fetch('/api/webhooks/test', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({target})
+  });
+  const data = await res.json();
+  alert(data.ok ? `✅ Test webhook delivered! Status: ${data.status}` : `❌ Failed: ${data.error}`);
+}
+
+async function notifyDraft(id) {
+  const d = (window._drafts || {})[id];
+  if (!d) return;
+  const target = prompt('Send to which webhook? (discord / slack / custom):', 'discord');
+  if (!target) return;
+  const res = await fetch(`/api/drafts/${id}/notify`, {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({target})
+  });
+  const data = await res.json();
+  alert(data.ok ? `✅ Draft notification sent to ${target}!` : `❌ Notification error: ${data.error}`);
+}
+
 // Initial bootstrap
 loadStatus();
 fetchFeed(document.getElementById('rssPreset').value);
 loadDrafts();
+checkDrawThingsStatus();
+setInterval(checkDrawThingsStatus, 30000);
 </script>
 </body>
 </html>"""
@@ -1322,6 +1812,31 @@ class Handler(BaseHTTPRequestHandler):
                            extra_headers={"Content-Disposition": 'attachment; filename="all_contentos_drafts.md"'})
                 return
 
+            # Phase C: Draw Things status
+            if path == "/api/draw-things-status":
+                self.send_json({"available": draw_things_available(), "url": DRAW_THINGS_URL})
+                return
+
+            # Phase C: Serve generated media files
+            if path.startswith("/api/media/"):
+                filename = path.rsplit("/", 1)[-1]
+                if not filename or "/" in filename or ".." in filename or not filename.endswith(".png"):
+                    self.send_error_json(400, "Invalid filename")
+                    return
+                filepath = MEDIA_DIR / filename
+                if not filepath.exists():
+                    self.send_error_json(404, "Media not found")
+                    return
+                self._send(filepath.read_bytes(), content_type="image/png")
+                return
+
+            # Phase E: Get webhook config (masked)
+            if path == "/api/webhooks":
+                config = get_webhook_config()
+                safe = {k: ("***configured***" if v else "") for k, v in config.items()}
+                self.send_json(safe)
+                return
+
             self.send_error_json(404, "Not found")
 
         except ApiError as err:
@@ -1421,6 +1936,79 @@ class Handler(BaseHTTPRequestHandler):
                 text = string_field(payload, "text")
                 slides = format_as_carousel(title, text)
                 self.send_json({"ok": True, "slides": slides, "count": len(slides)})
+                return
+
+            # Phase C: Local image generation via Draw Things
+            if path == "/api/generate-image":
+                prompt = string_field(payload, "prompt")
+                if not prompt:
+                    raise ApiError(400, "prompt is required")
+                result = generate_local_image(
+                    prompt,
+                    negative_prompt=string_field(payload, "negative_prompt"),
+                    width=int(payload.get("width", 1024)),
+                    height=int(payload.get("height", 576)),
+                    steps=int(payload.get("steps", 20))
+                )
+                self.send_json(result)
+                return
+
+            # Phase E: Save webhook config
+            if path == "/api/webhooks/save":
+                config = get_webhook_config()
+                for key in ("discord", "slack", "custom"):
+                    if key in payload:
+                        val = string_field(payload, key)
+                        if val:
+                            config[key] = val
+                save_webhook_config(config)
+                self.send_json({"ok": True})
+                return
+
+            # Phase E: Test webhook
+            if path == "/api/webhooks/test":
+                target = string_field(payload, "target")
+                config = get_webhook_config()
+                url = config.get(target, "")
+                test_draft = {
+                    "title": "ContentOS Test", "body": "Test from JustMeMedia ContentOS!",
+                    "platform": "General", "status": "Draft",
+                    "image_prompt": "", "created_at": now_iso()
+                }
+                if target == "discord":
+                    result = send_webhook(url, build_discord_payload(test_draft))
+                elif target == "slack":
+                    result = send_webhook(url, build_slack_payload(test_draft))
+                else:
+                    result = send_webhook(url, test_draft)
+                self.send_json(result)
+                return
+
+            # Phase E: Notify draft via webhook
+            if path.startswith("/api/drafts/") and path.endswith("/notify"):
+                parts = path.split("/")
+                draft_id = parts[3] if len(parts) > 3 else ""
+                target = string_field(payload, "target")
+                with db() as conn:
+                    cur = conn.execute("SELECT * FROM drafts WHERE id = ?", (draft_id,))
+                    row = cur.fetchone()
+                if not row:
+                    self.send_error_json(404, "Draft not found")
+                    return
+                draft = dict(row)
+                config = get_webhook_config()
+                url = config.get(target, "")
+                if not url:
+                    self.send_error_json(400, f"No webhook URL configured for target '{target}'")
+                    return
+                if target == "discord":
+                    wh_payload = build_discord_payload(draft)
+                elif target == "slack":
+                    wh_payload = build_slack_payload(draft)
+                else:
+                    wh_payload = {k: v for k, v in draft.items() if isinstance(v, (str, int, float, bool, type(None)))}
+                result = send_webhook(url, wh_payload)
+                self.send_json(result)
                 return
 
             # AI Generation

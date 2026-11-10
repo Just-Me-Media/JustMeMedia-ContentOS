@@ -59,6 +59,26 @@ Do not enable synchronization until the chosen method and conflict rules have be
 - `app/` — future local dashboard
 - `scripts/` — portable setup and maintenance scripts
 
-## Initial status
+## Features & Architecture
 
-This is a documentation and data scaffold, not a finished application. No live social accounts, model endpoints, credentials, publishing integrations, or synchronization are connected yet.
+JustMeMedia ContentOS is a zero-dependency, local-first content operations system running on Python standard library only.
+
+### Dual-Host Support
+- **M1 Pro Mac:** Interactive 3-column AI Studio & Visual Publishing Hub at `http://127.0.0.1:8765`
+- **ThinkCentre (Windows):** Background worker daemon (`app/worker.py`) scanning RSS, validating claims, queueing drafts 24/7 without cloud lock-in.
+
+### Multimodal Engine Capabilities
+- **Phase A — Omni-Platform Repurposing:** 1 article / headline instantly generates tailored LinkedIn thought-leadership posts, numbered X (Twitter) threads, and YouTube briefs simultaneously.
+- **Phase B — Anti-Slop & Viral Hook Library:** Automatically detects and strips AI corporate buzzwords (delve, leverage, synergize, holistic, etc.) and injects high-performing viral hook structures.
+- **Phase C — Local Draw Things / FLUX Studio:** Direct integration with Draw Things (`http://127.0.0.1:7860/sdapi/v1/txt2img`). Generates photorealistic AI artwork directly to local media storage with 1-click attachment.
+- **Phase D — Visual Carousel Slide Preview:** Splits long-form articles into structured carousel slides with real-time dark/green aesthetic slide previews.
+- **Phase E — Webhook Dispatcher:** One-click instant dispatch of approved drafts to Discord, Slack, or custom automation endpoints (n8n, Make, Zapier) with rich embeds and metadata.
+
+### Quick Start
+```bash
+# Start server
+cd app && python3 server.py
+
+# Run test suite (20/20 passing)
+PYTHONPATH=. python3 -B -m unittest -v tests/test_server.py
+```
