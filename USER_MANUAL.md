@@ -98,23 +98,33 @@ The worker scans feeds periodically, performs duplicate checks against the local
 
 ---
 
-### Step 1: Content Discovery & Trend Intake
+### Step 1: Content Discovery & Trend Intake (Or The 1-Click "Make Tea" Pipeline)
 
 Column 1 (**Content Discovery**) surfaces live news, trends, and stories to spark high-signal posts.
 
+#### ☕ The "Wake Up & Make Tea" 1-Click Pipeline (Fastest Workflow)
+1. In the morning, open `http://127.0.0.1:8765`.
+2. Browse the stories in Column 1 and find one that interests you.
+3. Click the green **`✨ 1-Click Create & Stage`** button on that story.
+4. **Walk away and make a cup of tea!** In the background, ContentOS will:
+   - Scrape the full article text and strip navigation/ads.
+   - Run the 4-Agent Roundtable (Drafter, Fact-Checker, Hook Optimizer, Anti-Slop Filter).
+   - Generate local visual art via Draw Things (or fetch an aesthetic high-relevance GIF if Draw Things is offline).
+   - Automatically assign the post to the next optimal publishing slot (`09:00`, `14:00`, or `18:30`).
+   - Save to the local database, load it into your editor, and play a gentle completion chime.
+5. Review the post in Column 3, make any tweaks if you wish, and click **`🚀 Copy & Launch LinkedIn ↗`** or **`🚀 Copy & Launch X ↗`**.
+
+#### ⚡ Manual & Step-by-Step Discovery Options:
 1. **Select a Curated Feed:**
    * **Hacker News Top Stories** (Engineering, startups, tech breakthroughs)
    * **NYT Technology News** (Mainstream industry news)
    * **Ars Technica Tech & AI** (In-depth analysis and computing)
 2. **Or Add a Custom RSS Feed:**
    * Paste any RSS or Atom feed URL into the input box and click **Load**.
-3. **Drafting a Single Story:**
-   * Browse the story cards.
-   * Click **⚡ Deep-Read & Draft** on any card.
-   * ContentOS automatically scrapes the full article text (bypassing ads and navigation junk), copies the headline to the editor, and pre-fills the post body.
+3. **Step-by-Step Deep-Read & Draft:**
+   * Click **⚡ Deep-Read & Draft** on any card to load the story into Column 2 for manual editing before generating.
 4. **Autonomous Batch Intake (Autopilot):**
-   * Want 3 posts drafted instantly? Click **⚡ Draft Top 3 Stories** under Autopilot Batch.
-   * ContentOS will extract the top 3 headlines, run drafting routines, and queue 3 ready-to-review drafts in Column 3 automatically.
+   * Want 3 posts drafted simultaneously? Click **⚡ Draft Top 3 Stories** under Autopilot Batch.
 
 ---
 
@@ -376,3 +386,4 @@ All **20/20 unit tests** will execute and verify database schema, security heade
 ---
 
 *Manual maintained by JustMeMedia. For technical questions or codebase updates, refer to `README.md` and `SECURITY.md`.*
+

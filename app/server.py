@@ -156,6 +156,8 @@ def connect_db() -> sqlite3.Connection:
         conn.execute("ALTER TABLE drafts ADD COLUMN source_url TEXT NOT NULL DEFAULT ''")
     if "media_url" not in cols:
         conn.execute("ALTER TABLE drafts ADD COLUMN media_url TEXT NOT NULL DEFAULT ''")
+    if "scheduled_for" not in cols:
+        conn.execute("ALTER TABLE drafts ADD COLUMN scheduled_for TEXT NOT NULL DEFAULT ''")
 
     # 2. Content items & versions (ThinkCentre relational schema)
     conn.execute("""
@@ -779,6 +781,26 @@ def run_roundtable(provider_id: str, title: str, context: str, platform: str, to
     }
 
 
+def calculate_next_optimal_slot() -> str:
+    """Calculates the next optimal social posting slot (09:00, 14:00, or 18:30)."""
+    now = datetime.now()
+    today_9am = now.replace(hour=9, minute=0, second=0, microsecond=0)
+    today_2pm = now.replace(hour=14, minute=0, second=0, microsecond=0)
+    today_630pm = now.replace(hour=18, minute=30, second=0, microsecond=0)
+
+    if now < today_9am:
+        target = today_9am
+    elif now < today_2pm:
+        target = today_2pm
+    elif now < today_630pm:
+        target = today_630pm
+    else:
+        from datetime import timedelta
+        target = (now + timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
+
+    return target.strftime("%Y-%m-%d %H:%M")
+
+
 def format_as_thread(post_text: str, max_tweet_len: int = 270) -> list[str]:
     """Split a long post into numbered tweet segments for X."""
     paragraphs = [p.strip() for p in post_text.split("\n\n") if p.strip()]
@@ -921,6 +943,8 @@ textarea{min-height:160px;resize:vertical;font-family:inherit}
 .status-draft{background:#2d3748;color:#cbd5e0}
 .status-approved{background:#22543d;color:#9ae6b4}
 .status-published{background:#2c5282;color:#bee3f8}
+.scheduled-pill{font-size:10px;background:#1a202c;border:1px solid #4a5568;color:#90cdf4;padding:2px 7px;border-radius:10px;font-weight:600;display:inline-flex;align-items:center;gap:4px}
+.slot-select{background:var(--panel);border:1px solid var(--line);color:var(--text);font-size:11px;padding:3px 6px;border-radius:4px;outline:none;cursor:pointer}
 .item-card{background:var(--panel-alt);border:1px solid var(--line);border-radius:8px;padding:12px;margin-bottom:12px;position:relative}
 .item-card h3{margin:0 0 6px;font-size:14px;color:#fff;word-break:break-word}
 .item-meta{font-size:11px;color:var(--muted);display:flex;align-items:center;gap:8px;margin-bottom:8px}
@@ -1182,14 +1206,137 @@ async function fetchFeed(url) {
       <div class="source-item">
         <a href="${item.url}" target="_blank" rel="noopener">${escapeHtml(item.title)}</a>
         <p style="margin:4px 0 6px;color:var(--muted);font-size:11px">${escapeHtml(item.snippet)}</p>
-        <button class="btn btn-secondary btn-small" onclick="useStory(${idx})">
-          ⚡ Deep-Read & Draft
-        </button>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button id="btnOneClick_${idx}" class="btn btn-small" style="background:#22543d;color:#9ae6b4;border:1px solid #2f855a;font-weight:700" onclick="oneClickCreate(${idx})">
+            ✨ 1-Click Create & Stage
+          </button>
+          <button class="btn btn-secondary btn-small" onclick="useStory(${idx})">
+            ⚡ Deep-Read & Draft
+          </button>
+        </div>
       </div>
     `).join('');
   } catch (err) {
     listEl.innerHTML = '<div style="color:var(--danger);padding:10px 0">Failed to fetch RSS feed.</div>';
   }
+}
+
+async function oneClickCreate(idx) {
+  const item = (window._sources || [])[idx];
+  if (!item) return;
+
+  const btn = document.getElementById(`btnOneClick_${idx}`);
+  const originalText = btn.innerHTML;
+  btn.disabled = true;
+
+  btn.innerHTML = '⏳ [1/4] Reading…';
+  const provider = document.getElementById('aiProvider').value;
+  const platform = document.getElementById('draftPlatform').value;
+  const tone = document.getElementById('draftTone').value;
+
+  try {
+    setTimeout(() => { if (btn.disabled) btn.innerHTML = '⏳ [2/4] Drafting & Anti-slop…'; }, 800);
+    setTimeout(() => { if (btn.disabled) btn.innerHTML = '⏳ [3/4] Creating visual…'; }, 2000);
+    setTimeout(() => { if (btn.disabled) btn.innerHTML = '⏳ [4/4] Scheduling…'; }, 3200);
+
+    const res = await fetch('/api/one-click-draft', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        title: item.title,
+        url: item.url,
+        snippet: item.snippet,
+        platform: platform,
+        tone: tone,
+        provider: provider
+      })
+    });
+    const data = await res.json();
+    if (data.ok) {
+      btn.innerHTML = '✅ Staged!';
+      btn.style.background = '#276749';
+
+      // Pre-fill center editor immediately
+      document.getElementById('draftTitle').value = data.title;
+      document.getElementById('draftBody').value = data.body;
+      document.getElementById('draftPlatform').value = data.platform;
+      document.getElementById('draftImagePrompt').value = data.image_prompt;
+      document.getElementById('draftSourceUrl').value = item.url;
+      document.getElementById('draftMediaUrl').value = data.media_url || '';
+      if (data.media_url) {
+        document.getElementById('attachedMediaUrl').textContent = data.media_url;
+        document.getElementById('attachedMediaPreview').style.display = 'block';
+      }
+      updateCharCount();
+
+      // Refresh drafts queue
+      loadDrafts();
+
+      // Gentle completion chime
+      playChime();
+    } else {
+      alert('1-Click Generation failed: ' + (data.error || 'Unknown error'));
+      btn.innerHTML = originalText;
+      btn.disabled = false;
+    }
+  } catch (err) {
+    alert('Network error: ' + err);
+    btn.innerHTML = originalText;
+    btn.disabled = false;
+  }
+}
+
+function playChime() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.type = 'sine';
+    const now = ctx.currentTime;
+    osc.frequency.setValueAtTime(523.25, now);
+    osc.frequency.setValueAtTime(783.99, now + 0.15);
+    gain.gain.setValueAtTime(0.15, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.55);
+    osc.start(now);
+    osc.stop(now + 0.55);
+  } catch(e) {}
+}
+
+function getTodaySlot(timeStr) {
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd} ${timeStr}`;
+}
+
+function getTomorrowSlot(timeStr) {
+  const d = new Date();
+  d.setDate(d.getDate() + 1);
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd} ${timeStr}`;
+}
+
+async function updateDraftSchedule(id, slot) {
+  if (!slot) return;
+  await fetch(`/api/drafts/${id}/schedule`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({scheduled_for: slot})
+  });
+  loadDrafts();
+}
+
+function copyAndLaunch(id, url) {
+  const d = (window._drafts || {})[id];
+  if (!d) return;
+  copyText(d.body);
+  window.open(url, '_blank');
+  markPublished(id);
 }
 
 async function useStory(idx) {
@@ -1475,12 +1622,24 @@ async function loadDrafts() {
     const statusClass = d.status === 'Approved' ? 'status-approved' : (d.status === 'Published' ? 'status-published' : 'status-draft');
     return `
       <div class="item-card">
-        <div style="display:flex;justify-content:space-between;align-items:flex-start">
-          <h3>${escapeHtml(d.title)}</h3>
-          <span class="status-pill ${statusClass}">${escapeHtml(d.status)}</span>
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
+          <h3 style="margin:0">${escapeHtml(d.title)}</h3>
+          <div style="display:flex;gap:4px;align-items:center;flex-shrink:0">
+            <span class="scheduled-pill">📅 ${escapeHtml(d.scheduled_for || 'Unscheduled')}</span>
+            <span class="status-pill ${statusClass}">${escapeHtml(d.status)}</span>
+          </div>
         </div>
-        <div class="item-meta">
-          <span>${escapeHtml(d.platform)}</span> · <span>${escapeHtml(d.updated_at.slice(0,10))}</span>
+        <div class="item-meta" style="justify-content:space-between;margin-top:6px">
+          <div><span>${escapeHtml(d.platform)}</span> · <span>${escapeHtml(d.updated_at.slice(0,10))}</span></div>
+          <select class="slot-select" onchange="updateDraftSchedule(${d.id}, this.value)">
+            <option value="">Reschedule slot…</option>
+            <option value="${getTodaySlot('09:00')}">Today 9:00 AM</option>
+            <option value="${getTodaySlot('14:00')}">Today 2:00 PM</option>
+            <option value="${getTodaySlot('18:30')}">Today 6:30 PM</option>
+            <option value="${getTomorrowSlot('09:00')}">Tomorrow 9:00 AM</option>
+            <option value="${getTomorrowSlot('14:00')}">Tomorrow 2:00 PM</option>
+            <option value="${getTomorrowSlot('18:30')}">Tomorrow 6:30 PM</option>
+          </select>
         </div>
         <p>${escapeHtml(d.body)}</p>
 
@@ -1500,20 +1659,20 @@ async function loadDrafts() {
         ` : ''}
 
         <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:10px">
-          <button class="btn btn-secondary btn-small" onclick="copyDraftText(${d.id})">📋 Copy Post</button>
+          <button class="btn btn-secondary btn-small" onclick="copyDraftText(${d.id})">📋 Copy</button>
           <button class="btn btn-secondary btn-small" onclick="downloadMarkdown(${d.id})">📥 Export .MD</button>
           ${d.status !== 'Approved' ? `
             <button class="btn btn-approve btn-small" onclick="approveDraft(${d.id})">✅ Approve</button>
           ` : `
-            <button class="btn btn-secondary btn-small" style="color:#bee3f8" onclick="markPublished(${d.id})">🚀 Mark Published</button>
+            <button class="btn btn-secondary btn-small" style="color:#bee3f8" onclick="markPublished(${d.id})">Mark Published</button>
           `}
           <button class="btn btn-secondary btn-small" onclick="notifyDraft(${d.id})">🔔 Notify</button>
           <button class="btn btn-danger btn-small" onclick="deleteDraft(${d.id})">Delete</button>
         </div>
 
-        <div class="composer-links">
-          ${d.platform === 'X' ? '<a href="https://x.com/compose/post" target="_blank" class="nav-btn">Open X Composer ↗</a>' : ''}
-          ${d.platform === 'LinkedIn' ? '<a href="https://www.linkedin.com/feed/" target="_blank" class="nav-btn">Open LinkedIn ↗</a>' : ''}
+        <div class="composer-links" style="margin-top:10px;display:flex;gap:6px">
+          ${d.platform === 'X' ? `<button class="btn btn-small" style="background:#1da1f2;color:#fff;font-weight:700" onclick="copyAndLaunch(${d.id}, 'https://x.com/compose/post')">🚀 Copy & Launch X ↗</button>` : ''}
+          ${d.platform === 'LinkedIn' ? `<button class="btn btn-small" style="background:#0077b5;color:#fff;font-weight:700" onclick="copyAndLaunch(${d.id}, 'https://www.linkedin.com/feed/')">🚀 Copy & Launch LinkedIn ↗</button>` : ''}
         </div>
       </div>
     `;
@@ -2112,6 +2271,79 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(result)
                 return
 
+            # 1-Click Magic Pipeline
+            if path == "/api/one-click-draft":
+                title = string_field(payload, "title")
+                url = string_field(payload, "url")
+                snippet = string_field(payload, "snippet")
+                platform = string_field(payload, "platform") or "LinkedIn"
+                tone = string_field(payload, "tone") or "thought_leadership"
+                provider = string_field(payload, "provider")
+                if not provider or provider == "none":
+                    provider = "groq:openai/gpt-oss-120b" if os.environ.get("GROQ_API_KEY") else "auto"
+                if not title:
+                    raise ApiError(400, "Title is required")
+                
+                deep_text = ""
+                if url:
+                    try:
+                        deep_text = extract_article_text(url)
+                    except Exception:
+                        deep_text = ""
+                context = deep_text if deep_text and not deep_text.startswith("(") else (snippet or title)
+                
+                res = run_roundtable(provider, title, context, platform, tone=tone)
+                
+                media_url = ""
+                if draw_things_available():
+                    try:
+                        img_res = generate_local_image(res["image_prompt"], width=1024, height=576, steps=20)
+                        if img_res.get("ok"):
+                            media_url = f"/api/media/{img_res['filename']}"
+                    except Exception:
+                        media_url = ""
+                
+                if not media_url:
+                    q_words = [w for w in re.sub(r"[^\w\s]", "", title).split() if len(w) > 3 and w.lower() not in ("with", "that", "this", "from", "have")][:2]
+                    try:
+                        gifs = search_gifs(" ".join(q_words) if q_words else "tech", limit=1)
+                        if gifs:
+                            media_url = gifs[0]["original"]
+                    except Exception:
+                        media_url = ""
+                
+                scheduled_for = calculate_next_optimal_slot()
+                stamp = now_iso()
+                with db() as conn:
+                    cur = conn.execute(
+                        """INSERT INTO drafts(title, body, platform, status, image_prompt, source_url, media_url, scheduled_for, created_at, updated_at)
+                           VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                        (title[:200], res["final_post"], platform[:40], "Draft", res["image_prompt"], url, media_url, scheduled_for, stamp, stamp)
+                    )
+                    draft_id = cur.lastrowid
+                self.send_json({
+                    "ok": True,
+                    "id": draft_id,
+                    "title": title,
+                    "body": res["final_post"],
+                    "image_prompt": res["image_prompt"],
+                    "media_url": media_url,
+                    "scheduled_for": scheduled_for,
+                    "platform": platform,
+                    "status": "Draft"
+                }, 201)
+                return
+
+            # Update draft schedule
+            if path.startswith("/api/drafts/") and path.endswith("/schedule"):
+                draft_id = path.split("/")[3]
+                scheduled_for = string_field(payload, "scheduled_for")
+                stamp = now_iso()
+                with db() as conn:
+                    conn.execute("UPDATE drafts SET scheduled_for = ?, updated_at = ? WHERE id = ?", (scheduled_for, stamp, draft_id))
+                self.send_json({"ok": True, "scheduled_for": scheduled_for})
+                return
+
             # AI Generation
             if path == "/api/generate":
                 try:
@@ -2181,15 +2413,16 @@ class Handler(BaseHTTPRequestHandler):
                 image_prompt = string_field(payload, "image_prompt")
                 source_url = string_field(payload, "source_url")
                 media_url = string_field(payload, "media_url")
+                scheduled_for = string_field(payload, "scheduled_for") or calculate_next_optimal_slot()
                 stamp = now_iso()
                 with db() as conn:
                     cur = conn.execute(
-                        """INSERT INTO drafts(title, body, platform, status, image_prompt, source_url, media_url, created_at, updated_at)
-                           VALUES(?,?,?,?,?,?,?,?,?)""",
-                        (title[:200], body, platform[:40], "Draft", image_prompt, source_url, media_url, stamp, stamp)
+                        """INSERT INTO drafts(title, body, platform, status, image_prompt, source_url, media_url, scheduled_for, created_at, updated_at)
+                           VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                        (title[:200], body, platform[:40], "Draft", image_prompt, source_url, media_url, scheduled_for, stamp, stamp)
                     )
                     draft_id = cur.lastrowid
-                self.send_json({"ok": True, "id": draft_id}, 201)
+                self.send_json({"ok": True, "id": draft_id, "scheduled_for": scheduled_for}, 201)
                 return
 
             # Save content items

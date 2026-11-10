@@ -219,6 +219,33 @@ class TestPhasesAtoE(unittest.TestCase):
             self.assertEqual(loaded["discord"], cfg["discord"])
             self.assertEqual(loaded["slack"], cfg["slack"])
 
+    def test_calculate_next_optimal_slot(self):
+        from app.server import calculate_next_optimal_slot
+        import re
+        slot = calculate_next_optimal_slot()
+        # Must match YYYY-MM-DD HH:MM format
+        self.assertRegex(slot, r"^\d{4}-\d{2}-\d{2} (09:00|14:00|18:30)$")
+
+    def test_draft_scheduled_for_field(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            test_dir = Path(tmp_dir)
+            import app.server as s
+            orig = s.DB_PATH
+            s.DB_PATH = test_dir / "contentos.db"
+            try:
+                stamp = now_iso()
+                with db() as conn:
+                    conn.execute(
+                        "INSERT INTO drafts(title, body, platform, status, scheduled_for, created_at, updated_at) "
+                        "VALUES(?,?,?,?,?,?,?)",
+                        ("Scheduled Post", "Content", "LinkedIn", "Draft", "2026-11-11 09:00", stamp, stamp)
+                    )
+                with db() as conn:
+                    row = conn.execute("SELECT * FROM drafts WHERE title='Scheduled Post'").fetchone()
+                    self.assertEqual(row["scheduled_for"], "2026-11-11 09:00")
+            finally:
+                s.DB_PATH = orig
+
 
 if __name__ == "__main__":
     unittest.main()
