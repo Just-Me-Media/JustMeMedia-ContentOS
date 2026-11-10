@@ -805,23 +805,38 @@ def run_roundtable(provider_id: str, title: str, context: str, platform: str, to
     }
     tone_instruction = tone_directives.get(tone, tone_directives["thought_leadership"])
 
+    is_x = platform.lower() in ("x", "twitter")
+
     # Agent 1: Drafter
     drafter_sys = (
         f"You are Agent 1 (The Drafter) for JustMeMedia. Brand voice: credible, practical, informed, zero hype.\n"
         f"{tone_instruction}"
     )
-    draft_prompt = (
-        f"Draft an engaging, high-signal post for {platform}.\n"
-        f"Topic: {title}\n"
-        f"Verified facts & source text: {context}\n"
-        f"Source URL: {source_url}\n\n"
-        f"MANDATORY RESOURCE & APPLICATION LINK:\n"
-        f"Always provide an actionable link near the end of the post so readers can learn more, read documentation, or apply directly.\n"
-        f"If a specific application/learn-more URL is mentioned in the source facts above, feature it directly.\n"
-        f"Otherwise, link the official announcement: {source_url}\n"
-        f"Format the link cleanly as '🔗 Learn more / Apply here: <URL>' or '🔗 Official Announcement: <URL>'.\n"
-        f"Format strictly for {platform} with double line breaks and clear headers/bullet points."
-    )
+    if is_x:
+        draft_prompt = (
+            f"Draft a punchy single post for X (Twitter).\n"
+            f"Topic: {title}\n"
+            f"Verified facts: {context[:800]}\n"
+            f"Source link: {source_url}\n\n"
+            f"CRITICAL CONSTRAINT - CHARACTER BUDGET:\n"
+            f"- MUST BE STRICTLY UNDER 250 CHARACTERS TOTAL. This is a single tweet.\n"
+            f"- 1 compelling hook sentence, 1 key insight, 1 link: {source_url}, and 1-2 hashtags.\n"
+            f"- NO markdown headers. NO bullet points. NO multi-paragraph walls of text.\n"
+            f"- Return ONLY the tweet text under 250 characters."
+        )
+    else:
+        draft_prompt = (
+            f"Draft an engaging, high-signal post for {platform}.\n"
+            f"Topic: {title}\n"
+            f"Verified facts & source text: {context}\n"
+            f"Source URL: {source_url}\n\n"
+            f"MANDATORY RESOURCE & APPLICATION LINK:\n"
+            f"Always provide an actionable link near the end of the post so readers can learn more, read documentation, or apply directly.\n"
+            f"If a specific application/learn-more URL is mentioned in the source facts above, feature it directly.\n"
+            f"Otherwise, link the official announcement: {source_url}\n"
+            f"Format the link cleanly as '🔗 Learn more / Apply here: <URL>' or '🔗 Official Announcement: <URL>'.\n"
+            f"Format strictly for {platform} with double line breaks and clear headers/bullet points."
+        )
     initial_draft = call_ai(provider_id, draft_prompt, drafter_sys)
     time.sleep(1.0)
 
@@ -845,24 +860,34 @@ def run_roundtable(provider_id: str, title: str, context: str, platform: str, to
     hook_sys = (
         f"You are Agent 3 (The Social Media Strategist). Brand: JustMeMedia.\n"
         f"Your job is to craft a magnetic first line (hook), ensure optimal spacing for mobile reading, "
-        f"and append an engaging closing question plus 3-5 relevant hashtags.\n"
+        f"and append an engaging closing question plus relevant hashtags.\n"
         f"{tone_instruction}"
     )
-    hook_prompt = (
-        f"Take this fact-checked draft for {platform} and maximize its reader engagement.\n"
-        f"Draft:\n{fact_checked_draft}\n\n"
-        f"Ensure there is a clear, actionable resource link at the end (e.g. '🔗 Learn more / Apply here: ...') so readers can click through.\n"
-        f"Target platform: {platform}.\n"
-        "Return ONLY the final, ready-to-post text."
-    )
+    if is_x:
+        hook_prompt = (
+            f"Refine this draft for X (Twitter) to maximize impact and ensure it fits in a single tweet:\n{fact_checked_draft}\n\n"
+            f"CRITICAL: Final output MUST BE STRICTLY UNDER 260 CHARACTERS including the link and hashtags.\n"
+            f"NO multi-paragraph text. Return ONLY the tweet text."
+        )
+    else:
+        hook_prompt = (
+            f"Take this fact-checked draft for {platform} and maximize its reader engagement.\n"
+            f"Draft:\n{fact_checked_draft}\n\n"
+            f"Ensure there is a clear, actionable resource link at the end (e.g. '🔗 Learn more / Apply here: ...') so readers can click through.\n"
+            f"Target platform: {platform}.\n"
+            "Return ONLY the final, ready-to-post text."
+        )
     final_post_raw = call_ai(provider_id, hook_prompt, hook_sys)
     time.sleep(1.0)
 
-    # Phase B: Apply Anti-Slop filter + Viral hook injection
+    # Phase B: Apply Anti-Slop filter + Platform formatters
     final_post_clean = strip_ai_slop(final_post_raw)
-    final_post = inject_viral_hook(final_post_clean, title)
-    if platform.lower() == "linkedin":
-        final_post = format_for_linkedin(final_post)
+    if is_x:
+        final_post = format_for_x(final_post_clean)
+    else:
+        final_post = inject_viral_hook(final_post_clean, title)
+        if platform.lower() == "linkedin":
+            final_post = format_for_linkedin(final_post)
 
     # Agent 4: Art Director (Image prompt)
     art_sys = "You are an elite Visual Art Director creating photorealistic, modern image briefs."
@@ -970,25 +995,134 @@ def start_scheduler_daemon() -> None:
 
 
 def format_as_thread(post_text: str, max_tweet_len: int = 270) -> list[str]:
-    """Split a long post into numbered tweet segments for X."""
-    paragraphs = [p.strip() for p in post_text.split("\n\n") if p.strip()]
-    tweets = []
-    current = ""
-    for p in paragraphs:
-        if not current:
-            current = p
-        elif len(current) + len(p) + 2 <= max_tweet_len:
-            current += "\n\n" + p
-        else:
-            tweets.append(current)
-            current = p
-    if current:
-        tweets.append(current)
+    """Split a post into numbered tweet segments for X.
+    Guarantees every single tweet in the list is strictly <= max_tweet_len (270 chars).
+    """
+    if not post_text:
+        return []
     
-    total = len(tweets)
+    # Clean markdown headers and bold asterisks first
+    cleaned_lines = []
+    for line in post_text.split("\n"):
+        s = line.strip()
+        if s.startswith("### "):
+            cleaned_lines.append(s[4:].replace("**", "").strip() + ":")
+        elif s.startswith("**") and s.endswith("**") and len(s) > 4:
+            cleaned_lines.append(s[2:-2].strip() + ":")
+        else:
+            cleaned = re.sub(r"\*\*(.*?)\*\*", r"\1", line)
+            cleaned = re.sub(r"(?<!\*)\*(?!\*)(.*?)(?<!\*)\*(?!\*)", r"\1", cleaned)
+            cleaned_lines.append(cleaned)
+    clean_text = "\n".join(cleaned_lines).strip()
+
+    # Split into raw sentence chunks across paragraphs
+    raw_blocks = [b.strip() for b in clean_text.split("\n\n") if b.strip()]
+    sentences = []
+    for block in raw_blocks:
+        b_clean = re.sub(r"^\d+/\d+\s*", "", block).strip()
+        s_list = re.split(r"(?<=[.!?])\s+", b_clean)
+        for s in s_list:
+            s_stripped = s.strip()
+            if s_stripped:
+                if len(s_stripped) > 180:
+                    words = s_stripped.split()
+                    cur = []
+                    for w in words:
+                        if len(" ".join(cur + [w])) > 180:
+                            sentences.append(" ".join(cur))
+                            cur = [w]
+                        else:
+                            cur.append(w)
+                    if cur:
+                        sentences.append(" ".join(cur))
+                else:
+                    sentences.append(s_stripped)
+
+    budget = max_tweet_len - 8
+    raw_tweets = []
+    current = ""
+    for s in sentences:
+        if not current:
+            current = s
+        elif len(current) + len(s) + 1 <= budget:
+            current += " " + s
+        else:
+            raw_tweets.append(current.strip())
+            current = s
+    if current:
+        raw_tweets.append(current.strip())
+
+    total = len(raw_tweets)
     if total <= 1:
-        return tweets
-    return [f"{i+1}/{total}\n\n{tw}" for i, tw in enumerate(tweets)]
+        t = raw_tweets[0] if raw_tweets else clean_text
+        return [t[:280]]
+
+    final_tweets = []
+    for i, tw in enumerate(raw_tweets):
+        prefix = f"{i+1}/{total}\n\n"
+        tweet_body = tw
+        if len(prefix + tweet_body) > max_tweet_len:
+            tweet_body = tweet_body[:max_tweet_len - len(prefix) - 1] + "…"
+        final_tweets.append(prefix + tweet_body)
+    return final_tweets
+
+
+def format_for_x(text: str, max_chars: int = 280) -> str:
+    """Format single post strictly for X (Twitter):
+    - Strictly <= max_chars (280 characters).
+    - Strips markdown asterisks and ### headers.
+    - Preserves core hook, link, and hashtags.
+    - Zero corporate filler.
+    """
+    if not text:
+        return ""
+    cleaned = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
+    cleaned = re.sub(r"(?<!\*)\*(?!\*)(.*?)(?<!\*)\*(?!\*)", r"\1", cleaned)
+    cleaned = re.sub(r"^###\s+", "", cleaned, flags=re.MULTILINE)
+    
+    if len(cleaned.strip()) <= max_chars:
+        return cleaned.strip()
+    
+    urls = re.findall(r"https?://\S+", cleaned)
+    primary_url = urls[0] if urls else ""
+    hashtags = re.findall(r"#\w+", cleaned)
+    tags_str = " ".join(hashtags[:2]) if hashtags else ""
+    
+    prose = cleaned
+    for u in urls:
+        prose = prose.replace(u, "")
+    for h in hashtags:
+        prose = prose.replace(h, "")
+    prose = re.sub(r"\s+", " ", prose).strip()
+    
+    url_len = len(primary_url) if primary_url else 0
+    tag_len = len(tags_str) if tags_str else 0
+    prose_budget = max_chars - (url_len + 2 if url_len else 0) - (tag_len + 2 if tag_len else 0)
+    if prose_budget < 60:
+        prose_budget = max_chars - tag_len - 4
+        primary_url = ""
+        
+    if len(prose) > prose_budget:
+        cut = prose[:prose_budget]
+        last_punct = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "))
+        if last_punct > 60:
+            condensed = cut[:last_punct + 1].strip()
+        else:
+            last_sp = cut.rfind(" ")
+            condensed = (cut[:last_sp] if last_sp > 50 else cut).strip() + "…"
+    else:
+        condensed = prose
+        
+    parts = [condensed]
+    if primary_url:
+        parts.append(primary_url)
+    if tags_str:
+        parts.append(tags_str)
+        
+    res = "\n\n".join(p for p in parts if p)
+    if len(res) > max_chars:
+        res = res[:max_chars - 1] + "…"
+    return res
 
 
 def format_as_carousel(title: str, post_text: str) -> list[dict]:
@@ -1846,12 +1980,27 @@ function cleanMarkdownForSocial(str) {
   }).join('\n');
 }
 
+function cleanForX(str) {
+  if (!str) return '';
+  if (str.includes('\n\n---\n\n')) {
+    const tweets = str.split('\n\n---\n\n');
+    return tweets[0].trim();
+  }
+  let cleaned = str.replace(/\*\*(.*?)\*\*/g, '$1').replace(/^###\s+/gm, '').trim();
+  if (cleaned.length <= 280) return cleaned;
+  let cut = cleaned.slice(0, 277);
+  let lastSpace = cut.lastIndexOf(' ');
+  return (lastSpace > 100 ? cut.slice(0, lastSpace) : cut) + '…';
+}
+
 function copyAndLaunch(id, url) {
   const d = (window._drafts || {})[id];
   if (!d) return;
   let text = d.body;
   if (d.platform === 'LinkedIn') {
     text = cleanMarkdownForSocial(text);
+  } else if (d.platform === 'X') {
+    text = cleanForX(text);
   }
   copyText(text);
   window.open(url, '_blank');
@@ -1895,11 +2044,23 @@ function updateCharCount() {
   else if (platform === 'YouTube') limit = 5000;
   else if (platform === 'Facebook') limit = 63200;
   else if (platform === 'Instagram' || platform === 'Threads') limit = 2200;
-  counter.textContent = `${count} / ${limit} characters (${platform})`;
-  if (count > limit) {
-    counter.classList.add('limit-exceeded');
+
+  if (platform === 'X' && text.includes('\n\n---\n\n')) {
+    const tweets = text.split('\n\n---\n\n');
+    const maxTweet = Math.max(...tweets.map(t => t.length));
+    counter.textContent = `${tweets.length} Tweets in Thread (Longest: ${maxTweet}/280)`;
+    if (maxTweet > 280) {
+      counter.classList.add('limit-exceeded');
+    } else {
+      counter.classList.remove('limit-exceeded');
+    }
   } else {
-    counter.classList.remove('limit-exceeded');
+    counter.textContent = `${count} / ${limit} characters (${platform})`;
+    if (count > limit) {
+      counter.classList.add('limit-exceeded');
+    } else {
+      counter.classList.remove('limit-exceeded');
+    }
   }
 }
 
@@ -2179,6 +2340,16 @@ async function loadDrafts() {
         </div>
         <p style="white-space:pre-wrap;line-height:1.4">${escapeHtml(d.body)}</p>
 
+        ${(d.platform === 'X' && d.body.length > 280 && !d.body.includes('\n\n---\n\n')) ? `
+          <div style="background:#3d1a14;border:1px solid #c53030;border-radius:6px;padding:8px 10px;margin:8px 0;display:flex;justify-content:space-between;align-items:center;gap:6px">
+            <span style="font-size:11px;color:#feb2b2;font-weight:600">⚠️ ${d.body.length} chars (Exceeds X limit of 280)</span>
+            <div style="display:flex;gap:4px">
+              <button class="btn btn-small" style="background:#e53e3e;color:#fff;padding:3px 8px;font-size:11px;font-weight:700" onclick="autoFitXDraft(${d.id})">✂️ Auto-Fit ≤ 280</button>
+              <button class="btn btn-small" style="background:#2b6cb0;color:#fff;padding:3px 8px;font-size:11px;font-weight:700" onclick="splitDraftToThread(${d.id})">🧵 Split to Thread</button>
+            </div>
+          </div>
+        ` : ''}
+
         ${d.media_url ? `
           <div style="margin:8px 0;background:#1a202c;border:1px solid #2d3748;border-radius:6px;padding:8px">
             <img src="${escapeHtml(d.media_url)}" style="max-height:160px;border-radius:4px;display:block;margin-bottom:8px" alt="Attached Media">
@@ -2222,8 +2393,49 @@ function copyDraftText(id) {
   let text = d.body;
   if (d.platform === 'LinkedIn') {
     text = cleanMarkdownForSocial(text);
+  } else if (d.platform === 'X') {
+    text = cleanForX(text);
   }
   copyText(text);
+}
+
+async function autoFitXDraft(id) {
+  const d = (window._drafts || {})[id];
+  if (!d) return;
+  const res = await fetch('/api/format-x', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({text: d.body})
+  });
+  const data = await res.json();
+  if (data.ok && data.text) {
+    await fetch(`/api/drafts/${id}/update-body`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({body: data.text})
+    });
+    loadDrafts();
+  }
+}
+
+async function splitDraftToThread(id) {
+  const d = (window._drafts || {})[id];
+  if (!d) return;
+  const res = await fetch('/api/format-thread', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({text: d.body})
+  });
+  const data = await res.json();
+  if (data.ok && data.tweets) {
+    const threadBody = data.tweets.join('\n\n---\n\n');
+    await fetch(`/api/drafts/${id}/update-body`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({body: threadBody})
+    });
+    loadDrafts();
+  }
 }
 
 function copyPromptText(id) {
@@ -2763,6 +2975,23 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True, "tweets": tweets, "count": len(tweets)})
                 return
 
+            # X Single Post Formatter
+            if path == "/api/format-x":
+                text = string_field(payload, "text")
+                clean = format_for_x(text, max_chars=280)
+                self.send_json({"ok": True, "text": clean, "length": len(clean)})
+                return
+
+            # Update Draft Body (for auto-fit and split thread on draft card)
+            if path.startswith("/api/drafts/") and path.endswith("/update-body"):
+                draft_id = path.split("/")[3]
+                body_text = string_field(payload, "body")
+                stamp = now_iso()
+                with db() as conn:
+                    conn.execute("UPDATE drafts SET body = ?, updated_at = ? WHERE id = ?", (body_text, stamp, draft_id))
+                self.send_json({"ok": True, "body": body_text})
+                return
+
             # Carousel Formatter
             if path == "/api/format-carousel":
                 title = string_field(payload, "title") or "Key Insights"
@@ -2994,20 +3223,33 @@ class Handler(BaseHTTPRequestHandler):
                     )
 
                     if task == "draft_post":
-                        user_prompt = (
-                            f"Write a high-engagement, brand-aligned post for {platform}.\n"
-                            f"Topic/Title: {title}\n"
-                            f"Context/Source facts: {context}\n\n"
-                            "Formatting guidelines:\n"
-                            "- LinkedIn: Executive thought leadership, punchy hook, clean double line breaks, bullet points, top 2 links, closing question (Max 2,200 chars).\n"
-                            "- X: Punchy 280-character maximum hook or 3-tweet thread format, high-signal, link to YouTube/full guide.\n"
-                            "- YouTube: Full comprehensive guide, catchy video title ideas, 15-second opening hook, detailed breakdown, complete verified resource link library (Up to 5,000 chars).\n"
-                            "- Facebook: Long-form conversational article, clear headers, full links list, discussion question.\n"
-                            "- Instagram/Threads: Story hook, clean spacing, engaging question.\n\n"
-                            "Return ONLY the post content."
-                        )
+                        if platform.lower() in ("x", "twitter"):
+                            user_prompt = (
+                                f"Write a high-engagement single post for X (Twitter).\n"
+                                f"Topic/Title: {title}\n"
+                                f"Context/Source facts: {context[:800]}\n\n"
+                                "CRITICAL CONSTRAINT - CHARACTER LIMIT:\n"
+                                "- The post MUST be strictly UNDER 250 characters total.\n"
+                                "- Include 1 punchy hook sentence, 1 key insight, and 1-2 hashtags.\n"
+                                "- DO NOT write multiple paragraphs. DO NOT use bullet points or markdown headers.\n"
+                                "Return ONLY the single tweet under 250 characters."
+                            )
+                        else:
+                            user_prompt = (
+                                f"Write a high-engagement, brand-aligned post for {platform}.\n"
+                                f"Topic/Title: {title}\n"
+                                f"Context/Source facts: {context}\n\n"
+                                "Formatting guidelines:\n"
+                                "- LinkedIn: Executive thought leadership, punchy hook, clean double line breaks, bullet points, top 2 links, closing question (Max 2,200 chars).\n"
+                                "- YouTube: Full comprehensive guide, catchy video title ideas, 15-second opening hook, detailed breakdown, complete verified resource link library (Up to 5,000 chars).\n"
+                                "- Facebook: Long-form conversational article, clear headers, full links list, discussion question.\n"
+                                "- Instagram/Threads: Story hook, clean spacing, engaging question.\n\n"
+                                "Return ONLY the post content."
+                            )
                         draft_text = call_ai(provider, user_prompt, system_prompt)
-                        if platform.lower() == "linkedin":
+                        if platform.lower() in ("x", "twitter"):
+                            draft_text = format_for_x(draft_text)
+                        elif platform.lower() == "linkedin":
                             draft_text = format_for_linkedin(draft_text)
                         img_prompt_request = (
                             f"Create a photorealistic, modern visual prompt to accompany this post for JustMeMedia.\n"

@@ -297,6 +297,38 @@ class TestPhasesAtoE(unittest.TestCase):
         self.assertIn("https://developer.apple.com", cleaned)
         self.assertIn("#Swift", cleaned)
 
+    def test_format_for_x_strict_limit(self):
+        from app.server import format_for_x
+        long_raw = (
+            "Developers, the Siri AI doors just swung wide open—here's why this reshapes app discovery.\n\n"
+            "**What's new in iOS 27.3:**\n"
+            "Apple is introducing conversational app intents that let system Siri interact directly with third-party apps "
+            "without having to launch full screen applications or navigate complex menu trees. This changes everything for developer workflows "
+            "and creates massive opportunities for early builders across iOS, iPadOS, macOS, and visionOS.\n\n"
+            "Check the full developer breakdown here: https://developer.apple.com/news/\n"
+            "#Apple #DevCommunity #iOS"
+        )
+        cleaned = format_for_x(long_raw)
+        self.assertLessEqual(len(cleaned), 280, f"X post must be <= 280 chars, was {len(cleaned)}")
+        self.assertNotIn("**", cleaned)
+        self.assertNotIn("###", cleaned)
+        self.assertIn("https://developer.apple.com/news/", cleaned)
+
+    def test_format_as_thread_strict_limit(self):
+        from app.server import format_as_thread
+        long_essay = (
+            "Apple just opened its Siri AI API to every developer worldwide. This is the biggest platform shift since the App Store launched in 2008.\n\n"
+            "First, app discovery is moving from static keywords to natural language execution. Instead of hoping a user searches for your app name, Siri will call your App Intent whenever their intent matches your capability.\n\n"
+            "Second, the execution happens on-device using Private Cloud Compute and Apple Silicon Neural Engines. Users never have to compromise data privacy or wait for high-latency external servers.\n\n"
+            "Third, the submission window opens today with complete starter documentation, test suites, and sample projects ready for Swift developers.\n\n"
+            "Get started with the full guide here: https://developer.apple.com/news/ #Apple #Swift #AI"
+        )
+        tweets = format_as_thread(long_essay, max_tweet_len=270)
+        self.assertGreater(len(tweets), 1)
+        for i, tw in enumerate(tweets):
+            self.assertLessEqual(len(tw), 270, f"Tweet {i+1} exceeds 270 chars ({len(tw)}): {tw}")
+            self.assertTrue(tw.startswith(f"{i+1}/{len(tweets)}\n\n"))
+
 
 if __name__ == "__main__":
     unittest.main()
