@@ -349,7 +349,7 @@ def draw_things_available() -> bool:
     """Check if Draw Things local API server is running."""
     try:
         url = os.environ.get("DRAW_THINGS_URL", DRAW_THINGS_URL).rstrip("/")
-        req = urllib.request.Request(url + "/sdapi/v1/sd-models",
+        req = urllib.request.Request(url + "/sdapi/v1/options",
                                      headers=_draw_things_headers())
         with urllib.request.urlopen(req, timeout=2) as resp:
             return resp.status == 200
