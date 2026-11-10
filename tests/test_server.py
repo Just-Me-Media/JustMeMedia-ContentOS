@@ -266,6 +266,13 @@ class TestPhasesAtoE(unittest.TestCase):
             finally:
                 s.DB_PATH = orig
 
+    def test_deep_research_story_structure(self):
+        from app.server import deep_research_story
+        res = deep_research_story("", "AI Revolution", "Local AI models run on Apple Silicon.")
+        self.assertIn("dossier", res)
+        self.assertEqual(res["title"], "AI Revolution")
+        self.assertIn("Local AI models run on Apple Silicon", res["dossier"])
+
 
 if __name__ == "__main__":
     unittest.main()

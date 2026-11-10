@@ -732,6 +732,69 @@ def extract_article_text(url: str, max_chars: int = 4000) -> str:
         return f"(Could not scrape full article body: {exc})"
 
 
+
+def deep_research_story(url: str, title: str, snippet: str = "") -> dict:
+    """Agent 0: The Deep Investigator.
+    
+    1. Extracts primary article text and gathers all outbound resource links.
+    2. Identifies high-value sub-links (documentation, application portals, github repos).
+    3. Shallow-scrapes top sub-links to extract concrete deadlines, eligibility, system requirements.
+    4. Compiles a rich Research Dossier with categorized links.
+    """
+    primary_text = extract_article_text(url) if url else snippet or title
+    
+    # Extract links from primary page
+    links = []
+    if url:
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
+            )
+            with urllib.request.urlopen(req, timeout=6) as resp:
+                raw = resp.read(250_000)
+                parser = CleanTextExtractor(base_url=url)
+                parser.feed(raw.decode(resp.headers.get_content_charset() or "utf-8", errors="replace"))
+                links = parser.links
+        except Exception:
+            pass
+
+    # Find high-value sub-links for secondary research
+    sub_research_notes = []
+    valuable_keywords = ("apply", "student", "challenge", "docs", "documentation", "guide", "learn", "github", "portal", "register", "api")
+    researched_count = 0
+    for l in links:
+        t_low = l["text"].lower()
+        h_low = l["href"].lower()
+        if any(k in t_low or k in h_low for k in valuable_keywords) and researched_count < 2:
+            try:
+                sub_text = extract_article_text(l["href"], max_chars=1200)
+                if sub_text and len(sub_text) > 100 and not sub_text.startswith("("):
+                    sub_research_notes.append(f"--- Sub-Research from [{l['text']}] ({l['href']}) ---\n{sub_text[:800]}")
+                    researched_count += 1
+            except Exception:
+                pass
+
+    # Compile the Research Dossier
+    dossier = primary_text
+    if sub_research_notes:
+        dossier += "\n\n=== DEEP INVESTIGATION SUB-FINDINGS ===\n" + "\n\n".join(sub_research_notes)
+    
+    if links:
+        dossier += "\n\n=== VERIFIED RESOURCE & ACTION LINKS ===\n"
+        for l in links[:6]:
+            dossier += f"• {l['text']}: {l['href']}\n"
+    elif url:
+        dossier += f"\n\n=== PRIMARY SOURCE ===\n• Official Announcement: {url}\n"
+
+    return {
+        "title": title,
+        "source_url": url,
+        "dossier": dossier,
+        "links": links[:6]
+    }
+
+
 def run_roundtable(provider_id: str, title: str, context: str, platform: str, tone: str = "thought_leadership", source_url: str = "") -> dict:
     """3-Agent Consensus Pipeline: Drafter -> Fact-Checker -> Hook/Format Optimizer -> Art Director."""
     tone_directives = {
@@ -1199,10 +1262,11 @@ textarea{min-height:160px;resize:vertical;font-family:inherit}
       <div>
         <label for="draftPlatform">Platform</label>
         <select id="draftPlatform" onchange="updateCharCount()">
-          <option value="LinkedIn">LinkedIn</option>
-          <option value="X">X (Twitter)</option>
+          <option value="LinkedIn">LinkedIn (Exec Post)</option>
+          <option value="X">X (Twitter Thread/Hook)</option>
+          <option value="YouTube">YouTube (Hub & Full Brief)</option>
+          <option value="Facebook">Facebook (Long-Form Guide)</option>
           <option value="Instagram">Instagram/Threads</option>
-          <option value="YouTube">YouTube Brief</option>
           <option value="General">General Draft</option>
         </select>
       </div>
@@ -1215,6 +1279,18 @@ textarea{min-height:160px;resize:vertical;font-family:inherit}
           <option value="contrarian">🔥 Contrarian / Hot Take</option>
         </select>
       </div>
+    </div>
+
+    <!-- AGENT 0: DEEP RESEARCH TOGGLE -->
+    <div style="background:var(--panel-alt);border:1px solid #2d3748;border-radius:6px;padding:8px 12px;margin-top:10px;display:flex;align-items:center;justify-content:space-between">
+      <div>
+        <label style="margin:0;font-size:12px;font-weight:700;color:#9ae6b4;display:flex;align-items:center;gap:6px">
+          <input type="checkbox" id="deepResearchToggle" checked style="accent-color:#2f855a">
+          🔬 Agent 0: Deep Research Enrichment
+        </label>
+        <div style="font-size:10px;color:var(--muted);margin-top:2px">Scrapes sub-portals, docs & application forms for 360° coverage</div>
+      </div>
+      <span style="font-size:10px;background:#14291e;border:1px solid #22543d;color:#9ae6b4;padding:2px 6px;border-radius:4px;font-weight:600">Active</span>
     </div>
 
     <!-- PIPELINE MODE SELECTOR -->
@@ -1263,19 +1339,22 @@ textarea{min-height:160px;resize:vertical;font-family:inherit}
       </div>
       <p style="margin:4px 0 8px;font-size:11px;color:var(--muted)">1 story ➔ LinkedIn post + X Thread + YouTube Brief simultaneously</p>
       <div id="omniBundleTabs" style="display:none">
-        <div style="display:flex;gap:6px;margin-bottom:8px">
+        <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap">
           <button class="omni-platform-tab active" onclick="showOmniTab('linkedin', this)">LinkedIn</button>
           <button class="omni-platform-tab" onclick="showOmniTab('x', this)">X Thread</button>
-          <button class="omni-platform-tab" onclick="showOmniTab('youtube', this)">YouTube</button>
+          <button class="omni-platform-tab" onclick="showOmniTab('youtube', this)">YouTube Hub</button>
+          <button class="omni-platform-tab" onclick="showOmniTab('facebook', this)">Facebook Guide</button>
         </div>
         <div id="omniLinkedin" class="omni-tab-content"></div>
         <div id="omniX" class="omni-tab-content" style="display:none"></div>
         <div id="omniYoutube" class="omni-tab-content" style="display:none"></div>
+        <div id="omniFacebook" class="omni-tab-content" style="display:none"></div>
         <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
           <button class="btn btn-small btn-secondary" onclick="loadOmniToDraft('linkedin')">Load LinkedIn</button>
           <button class="btn btn-small btn-secondary" onclick="loadOmniToDraft('x')">Load X</button>
           <button class="btn btn-small btn-secondary" onclick="loadOmniToDraft('youtube')">Load YouTube</button>
-          <button class="btn btn-small" onclick="saveOmniBundle()">💾 Save All 3 Drafts</button>
+          <button class="btn btn-small btn-secondary" onclick="loadOmniToDraft('facebook')">Load Facebook</button>
+          <button class="btn btn-small" style="background:#44337a;color:#d6bcfa;border:1px solid #6b46c1;font-weight:700" onclick="saveOmniBundle()">💾 Save All 4 Funnel Drafts</button>
         </div>
       </div>
     </div>
@@ -1763,8 +1842,13 @@ function updateCharCount() {
   const platform = document.getElementById('draftPlatform').value;
   const count = text.length;
   const counter = document.getElementById('charCounter');
-  let limit = platform === 'X' ? 280 : (platform === 'LinkedIn' ? 3000 : 2200);
-  counter.textContent = `${count} / ${limit} characters`;
+  let limit = 3000;
+  if (platform === 'X') limit = 280;
+  else if (platform === 'LinkedIn') limit = 3000;
+  else if (platform === 'YouTube') limit = 5000;
+  else if (platform === 'Facebook') limit = 63200;
+  else if (platform === 'Instagram' || platform === 'Threads') limit = 2200;
+  counter.textContent = `${count} / ${limit} characters (${platform})`;
   if (count > limit) {
     counter.classList.add('limit-exceeded');
   } else {
@@ -2182,15 +2266,22 @@ async function generateOmniBundle() {
       body: JSON.stringify({task:'draft_post', title, context, platform:'YouTube', tone, provider})});
     const ytData = await ytRes.json();
 
+    const fbRes = await fetch('/api/generate', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({task:'draft_post', title, context, platform:'Facebook', tone, provider})});
+    const fbData = await fbRes.json();
+    btn.textContent = '⏳ Formatted Facebook (4/4)…';
+
     _omniBundle = {
       linkedin: liData.ok ? liData.result : 'Error: ' + liData.error,
       x: xData.ok ? xData.result : 'Error: ' + xData.error,
       youtube: ytData.ok ? ytData.result : 'Error: ' + ytData.error,
+      facebook: fbData.ok ? fbData.result : 'Error: ' + fbData.error,
       image_prompt: liData.image_prompt || ''
     };
     document.getElementById('omniLinkedin').textContent = _omniBundle.linkedin;
     document.getElementById('omniX').textContent = _omniBundle.x;
     document.getElementById('omniYoutube').textContent = _omniBundle.youtube;
+    document.getElementById('omniFacebook').textContent = _omniBundle.facebook;
     document.getElementById('omniBundleTabs').style.display = 'block';
     if (liData.image_prompt) document.getElementById('draftImagePrompt').value = liData.image_prompt;
   } catch(e) { alert('Omni-bundle generation failed: ' + e); }
@@ -2198,7 +2289,7 @@ async function generateOmniBundle() {
 }
 
 function showOmniTab(tab, el) {
-  ['linkedin','x','youtube'].forEach(t => {
+  ['linkedin','x','youtube','facebook'].forEach(t => {
     document.getElementById('omni' + t.charAt(0).toUpperCase() + t.slice(1)).style.display = t === tab ? 'block' : 'none';
   });
   document.querySelectorAll('.omni-platform-tab').forEach(b => b.classList.remove('active'));
@@ -2216,7 +2307,7 @@ function loadOmniToDraft(tab) {
 async function saveOmniBundle() {
   if (!_omniBundle.linkedin) { alert('Generate bundle first.'); return; }
   const title = document.getElementById('draftTitle').value.trim() || 'Omni Bundle';
-  const platforms = [{key:'linkedin', platform:'LinkedIn'}, {key:'x', platform:'X'}, {key:'youtube', platform:'YouTube'}];
+  const platforms = [{key:'linkedin', platform:'LinkedIn'}, {key:'x', platform:'X'}, {key:'youtube', platform:'YouTube'}, {key:'facebook', platform:'Facebook'}];
   for (const p of platforms) {
     await fetch('/api/drafts', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({title: `${title} (${p.platform})`, body: _omniBundle[p.key], platform: p.platform,
@@ -2701,6 +2792,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(result)
                 return
 
+            # Deep Research Endpoint
+            if path == "/api/deep-research":
+                url = string_field(payload, "url")
+                title = string_field(payload, "title")
+                snippet = string_field(payload, "snippet")
+                res = deep_research_story(url, title, snippet)
+                self.send_json({"ok": True, "dossier": res["dossier"], "links": res["links"]})
+                return
+
             # Open media folder / reveal file in Finder
             if path == "/api/open-media":
                 filename = string_field(payload, "filename")
@@ -2756,13 +2856,17 @@ class Handler(BaseHTTPRequestHandler):
                 if not title:
                     raise ApiError(400, "Title is required")
                 
-                deep_text = ""
-                if url:
+                # Agent 0: Deep Investigator
+                use_deep = payload.get("deep_research", True)
+                if use_deep and url:
                     try:
-                        deep_text = extract_article_text(url)
+                        research = deep_research_story(url, title, snippet)
+                        context = research["dossier"]
                     except Exception:
-                        deep_text = ""
-                context = deep_text if deep_text and not deep_text.startswith("(") else (snippet or title)
+                        context = extract_article_text(url) or (snippet or title)
+                else:
+                    deep_text = extract_article_text(url) if url else ""
+                    context = deep_text if deep_text and not deep_text.startswith("(") else (snippet or title)
                 
                 res = run_roundtable(provider, title, context, platform, tone=tone, source_url=url)
                 
@@ -2843,10 +2947,11 @@ class Handler(BaseHTTPRequestHandler):
                             f"Topic/Title: {title}\n"
                             f"Context/Source facts: {context}\n\n"
                             "Formatting guidelines:\n"
-                            "- LinkedIn: Strong hook line, clean double line breaks, bullet points, CTA question, 3-5 hashtags.\n"
-                            "- X: Punchy 280-character maximum hook, high-signal, 2-3 hashtags.\n"
-                            "- Instagram/Threads: Story hook, clear spacing, engaging question.\n"
-                            "- YouTube: Catchy title, 2-paragraph description with keywords.\n\n"
+                            "- LinkedIn: Executive thought leadership, punchy hook, clean double line breaks, bullet points, top 2 links, closing question (Max 2,200 chars).\n"
+                            "- X: Punchy 280-character maximum hook or 3-tweet thread format, high-signal, link to YouTube/full guide.\n"
+                            "- YouTube: Full comprehensive guide, catchy video title ideas, 15-second opening hook, detailed breakdown, complete verified resource link library (Up to 5,000 chars).\n"
+                            "- Facebook: Long-form conversational article, clear headers, full links list, discussion question.\n"
+                            "- Instagram/Threads: Story hook, clean spacing, engaging question.\n\n"
                             "Return ONLY the post content."
                         )
                         draft_text = call_ai(provider, user_prompt, system_prompt)
