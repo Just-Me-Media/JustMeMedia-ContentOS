@@ -12,13 +12,14 @@
 - [x] **1-Click Live Progress Modal**: Step-by-step guidance modal with real-time progress (`[1/4] Scraping...`, `[2/4] Drafting...`, `[3/4] Draw Things...`, `[4/4] Scheduling...`) and direct `🚀 Copy Post & Open LinkedIn Now ↗` action launcher.
 - [x] **Agent 0: Deep Research Engine**: Parses secondary links inside source stories (applications, documentation, guides, starter repos), performs shallow investigation, and compiles a complete verified link dossier.
 - [x] **LinkedIn Markdown Formatter**: Cleans raw markdown `**bold**` asterisks and converts headers into clean, human-readable titles (`Key Dates:` instead of `**Key Dates**`) both on backend and during client copy.
+- [x] **Strict X Post Limiter & Thread Splitter**: Enforces $\le 280$ characters for X posts, bypasses viral hook bloat, splits threads with $\le 270$ chars per tweet, and adds 1-click `✂️ Auto-Fit ≤ 280` on draft cards.
 - [x] **4-Platform Omni-Funnel**: 1 article simultaneously generates LinkedIn executive post, X numbered thread, YouTube Hub comprehensive guide (up to 5,000 chars), and Facebook conversational article.
 - [x] **15-Source Curated Feed Library**: Apple Developer, Apple Newsroom, Google AI, OpenAI, Anthropic, DeepSeek, xAI, Meta AI, Microsoft AI, Hacker News, Ars Technica, MIT Tech Review, TechCrunch.
 - [x] **Background Scheduled Publishing Daemon**: Autonomous thread checking slots every 30s with native macOS desktop notifications (`⏰ Time to publish '<Title>' on LinkedIn!`) and Discord/Slack alerts.
 - [x] **4-Agent Consensus Pipeline**: Drafter ➔ Fact-Checker ➔ Hook Optimizer ➔ Anti-Slop Filter.
 - [x] **Human Approval State Machine**: `Draft` ➔ `Approved` ➔ `Published` with audit trail.
 - [x] **Webhook Dispatcher**: One-click dispatch of drafts to Discord, Slack, n8n, Make.
-- [x] **Unit Test Suite**: 25/25 passing unit tests in <0.3s.
+- [x] **Unit Test Suite**: 27/27 passing unit tests in <0.5s.
 
 ---
 
@@ -43,3 +44,4 @@
 - [ ] **Analytics Dashboard**: Track engagement and impressions across published posts.
 - [ ] **Visual Calendar View**: Monthly / weekly grid of scheduled vs published posts.
 - [ ] **Competitor Feed Monitor**: Track AI lab announcements and surface content gaps in real-time.
+
