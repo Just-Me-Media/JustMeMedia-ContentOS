@@ -614,17 +614,21 @@ def call_ai(provider_id: str, prompt: str, system_prompt: str = "") -> str:
                 data = json.loads(resp.read().decode("utf-8"))
                 return data["choices"][0]["message"]["content"].strip()
         except urllib.error.HTTPError as exc:
+            err_body = exc.read().decode("utf-8", errors="ignore")
             if exc.code == 429:
-                # Groq free-tier tokens-per-minute throttle: wait 3.5s and retry once
-                time.sleep(3.5)
+                # Groq free-tier tokens-per-minute throttle: dynamically parse wait time and retry
+                wait_sec = 6.0
+                match = re.search(r"try again in ([0-9.]+)s", err_body)
+                if match:
+                    wait_sec = float(match.group(1)) + 0.5
+                time.sleep(wait_sec)
                 try:
                     with urllib.request.urlopen(req, timeout=60) as resp:
                         data = json.loads(resp.read().decode("utf-8"))
                         return data["choices"][0]["message"]["content"].strip()
                 except Exception:
                     pass
-            err_msg = exc.read().decode("utf-8", errors="ignore")
-            raise RuntimeError(f"Groq API Error {exc.code}: {err_msg}") from exc
+            raise RuntimeError(f"Groq API Error {exc.code}: {err_body}") from exc
 
     elif provider_id.startswith("gemini:"):
         api_key = os.environ.get("GEMINI_API_KEY", "")
@@ -1577,15 +1581,20 @@ async function generateOmniBundle() {
   const btn = document.getElementById('btnOmni');
   btn.disabled = true; btn.textContent = '⏳ Repurposing All 3…';
   try {
-    const [liRes, xRes, ytRes] = await Promise.all([
-      fetch('/api/generate', {method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({task:'roundtable', title, context, platform:'LinkedIn', tone, provider})}),
-      fetch('/api/generate', {method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({task:'draft_post', title, context, platform:'X', tone, provider})}),
-      fetch('/api/generate', {method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({task:'draft_post', title, context, platform:'YouTube', tone, provider})}),
-    ]);
-    const [liData, xData, ytData] = await Promise.all([liRes.json(), xRes.json(), ytRes.json()]);
+    const liRes = await fetch('/api/generate', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({task:'draft_post', title, context, platform:'LinkedIn', tone, provider})});
+    const liData = await liRes.json();
+    btn.textContent = '⏳ Formatted LinkedIn (1/3)…';
+
+    const xRes = await fetch('/api/generate', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({task:'draft_post', title, context, platform:'X', tone, provider})});
+    const xData = await xRes.json();
+    btn.textContent = '⏳ Formatted X Thread (2/3)…';
+
+    const ytRes = await fetch('/api/generate', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({task:'draft_post', title, context, platform:'YouTube', tone, provider})});
+    const ytData = await ytRes.json();
+
     _omniBundle = {
       linkedin: liData.ok ? liData.result : 'Error: ' + liData.error,
       x: xData.ok ? xData.result : 'Error: ' + xData.error,
