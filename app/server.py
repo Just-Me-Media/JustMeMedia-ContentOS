@@ -62,6 +62,14 @@ def _load_env_fallback() -> None:
                         val = line.split("=", 1)[1].strip("\"' ")
                         if val:
                             os.environ["GEMINI_API_KEY"] = val
+                    elif line.startswith("export DRAW_THINGS_API_KEY=") and not os.environ.get("DRAW_THINGS_API_KEY"):
+                        val = line.split("=", 1)[1].strip("\"' ")
+                        if val:
+                            os.environ["DRAW_THINGS_API_KEY"] = val
+                    elif line.startswith("export DRAW_THINGS_URL=") and not os.environ.get("DRAW_THINGS_URL"):
+                        val = line.split("=", 1)[1].strip("\"' ")
+                        if val:
+                            os.environ["DRAW_THINGS_URL"] = val
             except Exception:
                 pass
 
@@ -317,15 +325,28 @@ def inject_viral_hook(text: str, title: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 DRAW_THINGS_URL = os.environ.get("DRAW_THINGS_URL", "http://127.0.0.1:7860")
+DRAW_THINGS_API_KEY = os.environ.get("DRAW_THINGS_API_KEY", "")
 MEDIA_DIR = data_dir() / "media"
 MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _draw_things_headers(extra: dict | None = None) -> dict:
+    headers = {"Accept": "application/json"}
+    key = os.environ.get("DRAW_THINGS_API_KEY", "") or DRAW_THINGS_API_KEY
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+        headers["X-API-Key"] = key
+    if extra:
+        headers.update(extra)
+    return headers
 
 
 def draw_things_available() -> bool:
     """Check if Draw Things local API server is running."""
     try:
-        req = urllib.request.Request(DRAW_THINGS_URL + "/sdapi/v1/sd-models",
-                                     headers={"Accept": "application/json"})
+        url = os.environ.get("DRAW_THINGS_URL", DRAW_THINGS_URL).rstrip("/")
+        req = urllib.request.Request(url + "/sdapi/v1/sd-models",
+                                     headers=_draw_things_headers())
         with urllib.request.urlopen(req, timeout=2) as resp:
             return resp.status == 200
     except Exception:
@@ -353,10 +374,11 @@ def generate_local_image(prompt: str, negative_prompt: str = "", width: int = 10
         "sampler_name": "DPM++ 2M Karras",
     }
     try:
+        url = os.environ.get("DRAW_THINGS_URL", DRAW_THINGS_URL).rstrip("/")
         req = urllib.request.Request(
-            DRAW_THINGS_URL + "/sdapi/v1/txt2img",
+            url + "/sdapi/v1/txt2img",
             data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"}
+            headers=_draw_things_headers({"Content-Type": "application/json"})
         )
         with urllib.request.urlopen(req, timeout=120) as resp:
             data = json.loads(resp.read().decode("utf-8"))
