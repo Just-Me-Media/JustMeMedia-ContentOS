@@ -14,6 +14,7 @@ import random
 import re
 import sqlite3
 import sys
+import time
 import traceback
 import urllib.error
 import urllib.parse
@@ -501,10 +502,11 @@ def get_available_providers() -> dict:
     providers = []
     # Fast cloud providers first so the default dropdown selection is ultra-fast
     if os.environ.get("GROQ_API_KEY"):
-        providers.append({"id": "groq:llama-3.3-70b-versatile", "name": "⚡ Groq Cloud: Llama 3.3 70B (Ultra-Fast)", "type": "cloud"})
+        providers.append({"id": "groq:openai/gpt-oss-120b", "name": "⚡ Groq Cloud: GPT-OSS 120B (Frontier & Ultra-Fast)", "type": "cloud"})
+        providers.append({"id": "groq:qwen/qwen3.8-27b", "name": "⚡ Groq Cloud: Qwen 3.8 27B (High-Speed)", "type": "cloud"})
 
     if os.environ.get("GEMINI_API_KEY"):
-        providers.append({"id": "gemini:gemini-2.5-flash", "name": "✨ Google Gemini 2.5 Flash (Cloud)", "type": "cloud"})
+        providers.append({"id": "gemini:gemini-3.8-flash", "name": "✨ Google Gemini 3.8 Flash (Cloud)", "type": "cloud"})
 
     ollama = ollama_info()
     if ollama.get("available"):
@@ -526,9 +528,9 @@ def call_ai(provider_id: str, prompt: str, system_prompt: str = "") -> str:
     # If empty or none, select best available provider
     if not provider_id or provider_id in ("auto", "none"):
         if os.environ.get("GROQ_API_KEY"):
-            provider_id = "groq:llama-3.3-70b-versatile"
+            provider_id = "groq:openai/gpt-oss-120b"
         elif os.environ.get("GEMINI_API_KEY"):
-            provider_id = "gemini:gemini-2.5-flash"
+            provider_id = "gemini:gemini-3.8-flash"
         else:
             info = ollama_info()
             if info.get("available") and info.get("models"):
@@ -575,16 +577,30 @@ def call_ai(provider_id: str, prompt: str, system_prompt: str = "") -> str:
             ],
             "temperature": 0.7
         }
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) JustMeMediaContentOS/1.0"
+        }
         try:
             req = urllib.request.Request(
                 url,
                 data=json.dumps(payload).encode("utf-8"),
-                headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
+                headers=headers
             )
             with urllib.request.urlopen(req, timeout=60) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 return data["choices"][0]["message"]["content"].strip()
         except urllib.error.HTTPError as exc:
+            if exc.code == 429:
+                # Groq free-tier tokens-per-minute throttle: wait 3.5s and retry once
+                time.sleep(3.5)
+                try:
+                    with urllib.request.urlopen(req, timeout=60) as resp:
+                        data = json.loads(resp.read().decode("utf-8"))
+                        return data["choices"][0]["message"]["content"].strip()
+                except Exception:
+                    pass
             err_msg = exc.read().decode("utf-8", errors="ignore")
             raise RuntimeError(f"Groq API Error {exc.code}: {err_msg}") from exc
 
@@ -681,6 +697,7 @@ def run_roundtable(provider_id: str, title: str, context: str, platform: str, to
         f"Format strictly for {platform} with double line breaks and clear headers/bullet points."
     )
     initial_draft = call_ai(provider_id, draft_prompt, drafter_sys)
+    time.sleep(1.0)
 
     # Agent 2: Fact-Checker & Anti-Hallucination Guard
     checker_sys = (
@@ -696,6 +713,7 @@ def run_roundtable(provider_id: str, title: str, context: str, platform: str, to
         "Return the refined, fact-checked post directly."
     )
     fact_checked_draft = call_ai(provider_id, check_prompt, checker_sys)
+    time.sleep(1.0)
 
     # Agent 3: Social Hook & Formatting Optimizer
     hook_sys = (
@@ -711,6 +729,7 @@ def run_roundtable(provider_id: str, title: str, context: str, platform: str, to
         "Return ONLY the final, ready-to-post text."
     )
     final_post_raw = call_ai(provider_id, hook_prompt, hook_sys)
+    time.sleep(1.0)
 
     # Phase B: Apply Anti-Slop filter + Viral hook injection
     final_post_clean = strip_ai_slop(final_post_raw)
@@ -1885,7 +1904,7 @@ class Handler(BaseHTTPRequestHandler):
                     feed_url = query.get("feed_url", ["https://news.ycombinator.com/rss"])[0]
                     provider = query.get("provider", [""])[0]
                     if not provider or provider == "none":
-                        provider = "groq:llama-3.3-70b-versatile" if os.environ.get("GROQ_API_KEY") else "auto"
+                        provider = "groq:openai/gpt-oss-120b" if os.environ.get("GROQ_API_KEY") else "auto"
                     stories = fetch_rss_feed(feed_url, limit=3)
                     created_count = 0
                     for s in stories:
