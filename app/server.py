@@ -1047,6 +1047,35 @@ textarea{min-height:160px;resize:vertical;font-family:inherit}
 .omni-platform-tab{padding:6px 12px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;border:1px solid var(--line);background:transparent;color:var(--muted)}
 .omni-platform-tab.active{background:var(--accent);color:#08130b;border-color:var(--accent)}
 .omni-tab-content{background:#0c120e;border:1px solid #354a3e;border-radius:6px;padding:10px;margin-top:6px;font-size:12px;color:#d2ded5;white-space:pre-wrap;max-height:180px;overflow-y:auto}
+
+.pipeline-modal-backdrop {
+  position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+  background: rgba(0, 0, 0, 0.78); backdrop-filter: blur(5px);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 99999;
+}
+.pipeline-modal {
+  background: #111418; border: 1px solid #2d3748; border-radius: 12px;
+  width: 90%; max-width: 520px; padding: 24px; box-shadow: 0 20px 45px rgba(0,0,0,0.85);
+  color: #fff; font-family: inherit;
+}
+.modal-step {
+  display: flex; align-items: center; gap: 12px; padding: 10px 14px;
+  background: #1a202c; border: 1px solid #2d3748; border-radius: 8px; margin-bottom: 8px;
+  font-size: 13px; transition: all .2s; color: #a0aec0;
+}
+.modal-step.active {
+  border-color: #319795; background: #17282c; color: #81e6d9; font-weight: 600;
+}
+.modal-step.done {
+  border-color: #276749; background: #14291e; color: #9ae6b4;
+}
+.action-banner {
+  background: #1a365d; border: 1px solid #2b6cb0; border-radius: 6px;
+  padding: 8px 12px; margin: 8px 0; display: flex; justify-content: space-between;
+  align-items: center; gap: 8px; flex-wrap: wrap;
+}
+
 </style>
 </head>
 <body>
@@ -1289,6 +1318,68 @@ textarea{min-height:160px;resize:vertical;font-family:inherit}
   </section>
 </main>
 
+<!-- PIPELINE GUIDANCE MODAL -->
+<div id="pipelineModal" class="pipeline-modal-backdrop" style="display:none">
+  <div class="pipeline-modal">
+    <div id="modalLoadingView">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+        <h3 style="margin:0;font-size:16px;color:#fff">✨ 1-Click Magic Pipeline Active</h3>
+        <span style="font-size:10px;background:#2d3748;padding:3px 8px;border-radius:10px;color:#9ae6b4;font-weight:700">AUTONOMOUS</span>
+      </div>
+      <p id="modalStoryTitle" style="color:#a0aec0;font-size:13px;margin:0 0 16px;font-style:italic;line-height:1.4"></p>
+      
+      <div id="mStep1" class="modal-step"><span>📖</span> <span>[1/4] Scraping deep article text & facts…</span></div>
+      <div id="mStep2" class="modal-step"><span>✍️</span> <span>[2/4] Running 4-Agent Roundtable (Hook & Anti-Slop)…</span></div>
+      <div id="mStep3" class="modal-step"><span>🎨</span> <span>[3/4] Painting visual art with Draw Things on Mac GPU…</span></div>
+      <div id="mStep4" class="modal-step"><span>📅</span> <span>[4/4] Auto-scheduling optimal peak posting slot…</span></div>
+      
+      <p style="font-size:11px;color:#718096;text-align:center;margin-top:14px">Feel free to step away and make tea ☕ — your Mac chime & phone will alert you when complete.</p>
+    </div>
+
+    <div id="modalSuccessView" style="display:none">
+      <div style="text-align:center;margin-bottom:16px">
+        <div style="font-size:36px;margin-bottom:4px">🎉</div>
+        <h3 style="margin:0;font-size:18px;color:#9ae6b4">Your Post & Artwork Are Ready!</h3>
+        <p style="font-size:12px;color:#a0aec0;margin:4px 0 0">Staged & saved to your local database.</p>
+      </div>
+
+      <div style="background:#1a202c;border:1px solid #2d3748;border-radius:8px;padding:12px;margin-bottom:16px">
+        <div style="font-size:11px;color:#9ae6b4;text-transform:uppercase;letter-spacing:1px;font-weight:700">👉 Step 1 of 2: Launch Post</div>
+        <div style="font-size:13px;color:#e2e8f0;margin:6px 0 12px;line-height:1.4" id="modalPostPreview"></div>
+        <div id="modalActionButtons"></div>
+        <div style="font-size:11px;color:#a0aec0;margin-top:8px">
+          💡 <strong>What happens when you click:</strong> Copies post to clipboard & opens your browser composer. Just press <code>Cmd + V</code> to paste!
+        </div>
+      </div>
+
+      <div style="background:#14291e;border:1px solid #22543d;border-radius:8px;padding:10px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center">
+        <div>
+          <div style="font-size:11px;color:#9ae6b4;font-weight:700">👉 Step 2 of 2: Attach Image</div>
+          <div style="font-size:11px;color:#cbd5e0;margin-top:2px">Artwork is saved in your <code>ContentOS Media</code> Desktop folder.</div>
+        </div>
+        <button class="btn btn-small" style="background:#22543d;color:#9ae6b4;border:1px solid #2f855a;white-space:nowrap" onclick="openMediaFinder()">📂 Open Folder</button>
+      </div>
+
+      <div style="display:flex;justify-content:flex-end;gap:8px">
+        <button class="btn btn-secondary btn-small" onclick="closePipelineModal()">Done / Close</button>
+      </div>
+    </div>
+
+    <div id="modalErrorView" style="display:none">
+      <div style="text-align:center;margin-bottom:14px">
+        <div style="font-size:36px;margin-bottom:4px">⚠️</div>
+        <h3 style="margin:0;font-size:16px;color:#feb2b2">Generation Paused</h3>
+        <p id="modalErrorMessage" style="font-size:12px;color:#fc8181;margin:6px 0 0"></p>
+      </div>
+      <div style="background:#2d3748;border-radius:8px;padding:10px;font-size:12px;color:#e2e8f0;margin-bottom:14px" id="modalErrorAdvice"></div>
+      <div style="display:flex;justify-content:flex-end;gap:8px">
+        <button class="btn btn-secondary btn-small" onclick="closePipelineModal()">Dismiss</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+
 <script>
 let currentProviders = [];
 
@@ -1397,6 +1488,86 @@ async function fetchFeed(url) {
   }
 }
 
+
+// ── PIPELINE GUIDANCE MODAL CONTROLS ──────────────────────────────────────────
+function openPipelineModal(title) {
+  document.getElementById('modalLoadingView').style.display = 'block';
+  document.getElementById('modalSuccessView').style.display = 'none';
+  document.getElementById('modalErrorView').style.display = 'none';
+  document.getElementById('modalStoryTitle').textContent = `"${title}"`;
+  
+  for (let i = 1; i <= 4; i++) {
+    const el = document.getElementById('mStep' + i);
+    el.className = 'modal-step';
+  }
+  document.getElementById('mStep1').classList.add('active');
+  document.getElementById('pipelineModal').style.display = 'flex';
+}
+
+function updateModalStep(stepNum) {
+  for (let i = 1; i <= 4; i++) {
+    const el = document.getElementById('mStep' + i);
+    if (i < stepNum) {
+      el.className = 'modal-step done';
+    } else if (i === stepNum) {
+      el.className = 'modal-step active';
+    } else {
+      el.className = 'modal-step';
+    }
+  }
+}
+
+function showModalSuccess(data) {
+  document.getElementById('modalLoadingView').style.display = 'none';
+  document.getElementById('modalSuccessView').style.display = 'block';
+  document.getElementById('modalErrorView').style.display = 'none';
+
+  const preview = (data.body || '').slice(0, 160) + '…';
+  document.getElementById('modalPostPreview').textContent = preview;
+
+  const btnContainer = document.getElementById('modalActionButtons');
+  const launchUrl = data.platform === 'X' ? 'https://x.com/compose/post' : 'https://www.linkedin.com/feed/';
+  const launchLabel = data.platform === 'X' ? '🚀 Copy Post & Open X Composer ↗' : '🚀 Copy Post & Open LinkedIn ↗';
+  const launchColor = data.platform === 'X' ? '#1da1f2' : '#0077b5';
+
+  btnContainer.innerHTML = `
+    <button class="btn" style="width:100%;background:${launchColor};color:#fff;font-weight:700;padding:12px;font-size:14px" onclick="copyAndLaunchFromModal(${data.id}, '${launchUrl}')">
+      ${launchLabel}
+    </button>
+  `;
+}
+
+function showModalError(errMessage) {
+  document.getElementById('modalLoadingView').style.display = 'none';
+  document.getElementById('modalSuccessView').style.display = 'none';
+  document.getElementById('modalErrorView').style.display = 'block';
+  document.getElementById('modalErrorMessage').textContent = errMessage;
+  let advice = 'Click Dismiss and try another story or switch your AI Provider in Column 2.';
+  if (errMessage.includes('Rate limit') || errMessage.includes('429')) {
+    advice = 'Groq Cloud free tier requests were paced. Wait ~10 seconds and click again.';
+  } else if (errMessage.includes('Draw Things')) {
+    advice = 'Draw Things is rendering or connecting. Check Draw Things Settings -> API Server.';
+  }
+  document.getElementById('modalErrorAdvice').textContent = advice;
+}
+
+function closePipelineModal() {
+  document.getElementById('pipelineModal').style.display = 'none';
+}
+
+function copyAndLaunchFromModal(id, url) {
+  copyAndLaunch(id, url);
+  closePipelineModal();
+}
+
+async function openMediaFinder(filename) {
+  await fetch('/api/open-media', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({filename: filename || ''})
+  });
+}
+
 async function oneClickCreate(idx) {
   const item = (window._sources || [])[idx];
   if (!item) return;
@@ -1404,16 +1575,18 @@ async function oneClickCreate(idx) {
   const btn = document.getElementById(`btnOneClick_${idx}`);
   const originalText = btn.innerHTML;
   btn.disabled = true;
+  btn.innerHTML = '⏳ In Progress…';
 
-  btn.innerHTML = '⏳ [1/4] Reading…';
+  openPipelineModal(item.title);
+
   const provider = document.getElementById('aiProvider').value;
   const platform = document.getElementById('draftPlatform').value;
   const tone = document.getElementById('draftTone').value;
 
   try {
-    setTimeout(() => { if (btn.disabled) btn.innerHTML = '⏳ [2/4] Drafting & Anti-slop…'; }, 800);
-    setTimeout(() => { if (btn.disabled) btn.innerHTML = '⏳ [3/4] Creating visual…'; }, 2000);
-    setTimeout(() => { if (btn.disabled) btn.innerHTML = '⏳ [4/4] Scheduling…'; }, 3200);
+    setTimeout(() => { if (btn.disabled) updateModalStep(2); }, 1200);
+    setTimeout(() => { if (btn.disabled) updateModalStep(3); }, 3500);
+    setTimeout(() => { if (btn.disabled) updateModalStep(4); }, 8000);
 
     const res = await fetch('/api/one-click-draft', {
       method: 'POST',
@@ -1451,6 +1624,9 @@ async function oneClickCreate(idx) {
       // Gentle completion chime
       playChime();
 
+      // Show rich modal success with 1-click action
+      showModalSuccess(data);
+
       // Phone push notification
       sendPhonePush(
         '✨ Post Ready: ' + data.title.slice(0,50),
@@ -1458,12 +1634,12 @@ async function oneClickCreate(idx) {
         'high'
       );
     } else {
-      alert('1-Click Generation failed: ' + (data.error || 'Unknown error'));
+      showModalError(data.error || 'Unknown error occurred during generation.');
       btn.innerHTML = originalText;
       btn.disabled = false;
     }
   } catch (err) {
-    alert('Network error: ' + err);
+    showModalError('Network or server connection failed: ' + err);
     btn.innerHTML = originalText;
     btn.disabled = false;
   }
@@ -1804,7 +1980,19 @@ async function loadDrafts() {
   queueEl.innerHTML = drafts.map(d => {
     const statusClass = d.status === 'Approved' ? 'status-approved' : (d.status === 'Published' ? 'status-published' : 'status-draft');
     return `
-      <div class="item-card">
+      <div class="item-card" style="border-left: 3px solid ${d.status === 'Published' ? '#3182ce' : '#38a169'}">
+        <!-- TOP 1-CLICK LAUNCH BANNER -->
+        <div style="background:#142233;border:1px solid #2b6cb0;border-radius:6px;padding:8px 10px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;gap:8px">
+          <div>
+            <div style="font-size:10px;color:#90cdf4;font-weight:700;letter-spacing:0.5px">⚡ READY TO PUBLISH</div>
+            <div style="font-size:11px;color:#e2e8f0;margin-top:2px">Copies text & opens ${escapeHtml(d.platform)} in browser</div>
+          </div>
+          <div>
+            ${d.platform === 'X' ? `<button class="btn btn-small" style="background:#1da1f2;color:#fff;font-weight:700;padding:6px 12px;font-size:12px" onclick="copyAndLaunch(${d.id}, 'https://x.com/compose/post')">🚀 Launch to X ↗</button>` : ''}
+            ${d.platform === 'LinkedIn' ? `<button class="btn btn-small" style="background:#0077b5;color:#fff;font-weight:700;padding:6px 12px;font-size:12px" onclick="copyAndLaunch(${d.id}, 'https://www.linkedin.com/feed/')">🚀 Launch to LinkedIn ↗</button>` : ''}
+          </div>
+        </div>
+
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
           <h3 style="margin:0">${escapeHtml(d.title)}</h3>
           <div style="display:flex;gap:4px;align-items:center;flex-shrink:0">
@@ -1824,11 +2012,16 @@ async function loadDrafts() {
             <option value="${getTomorrowSlot('18:30')}">Tomorrow 6:30 PM</option>
           </select>
         </div>
-        <p>${escapeHtml(d.body)}</p>
+        <p style="white-space:pre-wrap;line-height:1.4">${escapeHtml(d.body)}</p>
 
         ${d.media_url ? `
-          <div style="margin:6px 0">
-            <img src="${escapeHtml(d.media_url)}" style="max-height:100px;border-radius:4px" alt="Attached GIF">
+          <div style="margin:8px 0;background:#1a202c;border:1px solid #2d3748;border-radius:6px;padding:8px">
+            <img src="${escapeHtml(d.media_url)}" style="max-height:160px;border-radius:4px;display:block;margin-bottom:8px" alt="Attached Media">
+            <div style="display:flex;gap:6px;align-items:center">
+              <button class="btn btn-secondary btn-small" onclick="openMediaFinder('${escapeHtml(d.media_url.split('/').pop())}')">📂 Reveal Image in Finder</button>
+              <a href="${escapeHtml(d.media_url)}" download class="btn btn-secondary btn-small" style="text-decoration:none">📥 Download</a>
+              <span style="font-size:10px;color:var(--muted)">Drag into your post!</span>
+            </div>
           </div>
         ` : ''}
         
@@ -1841,8 +2034,9 @@ async function loadDrafts() {
           </div>
         ` : ''}
 
-        <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:10px">
-          <button class="btn btn-secondary btn-small" onclick="copyDraftText(${d.id})">📋 Copy</button>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;padding-top:10px;border-top:1px solid var(--line)">
+          <button class="btn btn-secondary btn-small" onclick="editDraftInStudio(${d.id})">✏️ Edit in Studio</button>
+          <button class="btn btn-secondary btn-small" onclick="copyDraftText(${d.id})">📋 Copy Text</button>
           <button class="btn btn-secondary btn-small" onclick="downloadMarkdown(${d.id})">📥 Export .MD</button>
           ${d.status !== 'Approved' ? `
             <button class="btn btn-approve btn-small" onclick="approveDraft(${d.id})">✅ Approve</button>
@@ -1851,11 +2045,6 @@ async function loadDrafts() {
           `}
           <button class="btn btn-secondary btn-small" onclick="notifyDraft(${d.id})">🔔 Notify</button>
           <button class="btn btn-danger btn-small" onclick="deleteDraft(${d.id})">Delete</button>
-        </div>
-
-        <div class="composer-links" style="margin-top:10px;display:flex;gap:6px">
-          ${d.platform === 'X' ? `<button class="btn btn-small" style="background:#1da1f2;color:#fff;font-weight:700" onclick="copyAndLaunch(${d.id}, 'https://x.com/compose/post')">🚀 Copy & Launch X ↗</button>` : ''}
-          ${d.platform === 'LinkedIn' ? `<button class="btn btn-small" style="background:#0077b5;color:#fff;font-weight:700" onclick="copyAndLaunch(${d.id}, 'https://www.linkedin.com/feed/')">🚀 Copy & Launch LinkedIn ↗</button>` : ''}
         </div>
       </div>
     `;
@@ -1890,8 +2079,30 @@ async function deleteDraft(id) {
 
 function copyText(str) {
   navigator.clipboard.writeText(str).then(() => {
-    alert('Copied to clipboard!');
+    const toast = document.getElementById('saveToast');
+    if (toast) {
+      toast.textContent = '📋 Copied to clipboard!';
+      toast.style.color = '#9ae6b4';
+      setTimeout(() => { toast.textContent = ''; }, 3000);
+    }
   });
+}
+
+function editDraftInStudio(id) {
+  const d = (window._drafts || {})[id];
+  if (!d) return;
+  document.getElementById('draftTitle').value = d.title;
+  document.getElementById('draftBody').value = d.body;
+  document.getElementById('draftPlatform').value = d.platform;
+  document.getElementById('draftImagePrompt').value = d.image_prompt || '';
+  document.getElementById('draftSourceUrl').value = d.source_url || '';
+  document.getElementById('draftMediaUrl').value = d.media_url || '';
+  if (d.media_url) {
+    document.getElementById('attachedMediaUrl').textContent = d.media_url;
+    document.getElementById('attachedMediaPreview').style.display = 'block';
+  }
+  updateCharCount();
+  document.getElementById('draftBody').focus();
 }
 
 function downloadMarkdown(id) {
@@ -2454,6 +2665,21 @@ class Handler(BaseHTTPRequestHandler):
                     wh_payload = {k: v for k, v in draft.items() if isinstance(v, (str, int, float, bool, type(None)))}
                 result = send_webhook(url, wh_payload)
                 self.send_json(result)
+                return
+
+            # Open media folder / reveal file in Finder
+            if path == "/api/open-media":
+                filename = string_field(payload, "filename")
+                if sys.platform == "darwin":
+                    if filename:
+                        filepath = MEDIA_DIR / filename
+                        if filepath.exists():
+                            subprocess.run(["open", "-R", str(filepath)])
+                        else:
+                            subprocess.run(["open", str(MEDIA_DIR)])
+                    else:
+                        subprocess.run(["open", str(MEDIA_DIR)])
+                self.send_json({"ok": True})
                 return
 
             # Phone Push Notification (ntfy.sh)
