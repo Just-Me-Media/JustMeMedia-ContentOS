@@ -70,11 +70,11 @@ JustMeMedia ContentOS is a zero-dependency, local-first content operations syste
 ### Multimodal Engine Capabilities
 - **Phase A — Omni-Platform Repurposing & Funnel Engine:** 1 article / headline instantly generates tailored content across 4 platforms: **LinkedIn** (executive thought leadership with automatic markdown asterisk cleanup), **X Thread** (punchy hook + numbered thread), **YouTube Hub** (full comprehensive script/brief up to 5,000 chars with verified resource library), and **Facebook Guide** (long-form narrative).
 - **Phase B — Anti-Slop & Viral Hook Library:** Automatically detects and strips AI corporate buzzwords (delve, leverage, synergize, holistic, etc.) and injects high-performing viral hook structures.
-- **Phase C — Local Draw Things / FLUX Studio:** Direct integration with Draw Things (`http://127.0.0.1:7860`). Generates photorealistic AI artwork on Apple Silicon GPUs directly into local media storage (`~/Desktop/ContentOS Media`) with 1-click Finder reveal and drag-and-drop posting.
+- **Phase C — Local Image Studio (macOS) / GIF fallback (Windows):** On macOS, direct integration with Draw Things (`http://127.0.0.1:7860`) generates photorealistic AI artwork on Apple Silicon GPUs into local media storage (`~/Desktop/ContentOS Media`) with 1-click Finder reveal. On Windows, Draw Things is disabled by default (`IMAGE_BACKEND=none`) and the pipeline attaches a relevant GIF instead. Windows GPU users can set `IMAGE_BACKEND=a1111` to use Forge / AUTOMATIC1111 / SD.Next.
 - **Phase D — Visual Carousel Slide Preview:** Splits long-form articles into structured carousel slides with real-time dark/green aesthetic slide previews.
 - **Phase E — Webhook Dispatcher & Scheduled Reminders:** One-click instant dispatch of approved drafts to Discord, Slack, or custom automation endpoints. Includes background daemon monitoring scheduled publication slots with native macOS desktop notifications.
 - **Agent 0 — Deep Research & Link Extraction:** Automatically navigates source URLs, follows sub-documentation, guides, and application pages, assembling a verified resource link library right inside your drafts.
-- **1-Click Live Progress Modal:** Real-time visual pipeline showing exact step-by-step progress (`[1/4] Scraping...`, `[2/4] Drafting...`, `[3/4] Draw Things...`, `[4/4] Scheduling...`) with direct one-click copy & launch into LinkedIn or X.
+- **1-Click Live Progress Modal:** Real-time visual pipeline showing exact step-by-step progress (`[1/4] Scraping...`, `[2/4] Drafting...`, `[3/4] Media...`, `[4/4] Scheduling...`) with direct one-click copy & launch into LinkedIn or X.
 
 ### Quick Start
 ```bash

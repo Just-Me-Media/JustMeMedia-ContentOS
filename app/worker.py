@@ -141,6 +141,14 @@ def run_worker_cycle(provider: str | None = None, limit_per_feed: int = 1) -> in
 
 
 def main():
+    # Keep Windows legacy consoles from crashing on non-cp1252 characters in
+    # feed titles or log messages.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
     parser = argparse.ArgumentParser(description="JustMeMedia ContentOS Background Autopilot Worker")
     parser.add_argument("--daemon", action="store_true", help="Run indefinitely in background loop")
     parser.add_argument("--once", action="store_true", help="Run a single intake cycle and exit")

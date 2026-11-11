@@ -224,6 +224,32 @@ class TestPhasesAtoE(unittest.TestCase):
             self.assertIn("Draw Things API not available", res["error"])
         finally:
             server.draw_things_available = orig
+        # Draw Things is offline in sandboxed test run; should gracefully return error dict
+        res = generate_local_image("a futuristic workstation")
+        self.assertFalse(res["ok"])
+        self.assertIn("Draw Things API not available", res["error"])
+        import app.server as server
+        orig = server.draw_things_available
+        server.draw_things_available = lambda: False
+        try:
+            res = generate_local_image("a futuristic workstation")
+            self.assertFalse(res["ok"])
+            self.assertTrue(res["error"])
+        finally:
+            server.draw_things_available = orig
+
+    def test_image_backend_capability(self):
+        from app import server
+        self.assertIn(server.IMAGE_BACKEND, ("none", "drawthings", "a1111"))
+        self.assertEqual(
+            server.LOCAL_IMAGE_ENABLED,
+            server.IMAGE_BACKEND in ("drawthings", "a1111"),
+        )
+        if server.IMAGE_BACKEND == "none":
+            self.assertFalse(server.draw_things_available())
+            res = server.generate_local_image("test")
+            self.assertFalse(res["ok"])
+            self.assertIn("disabled", res["error"].lower())
 
     def test_build_discord_payload(self):
         from app.server import build_discord_payload
