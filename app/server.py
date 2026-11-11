@@ -160,6 +160,12 @@ def connect_db() -> sqlite3.Connection:
         conn.execute("ALTER TABLE drafts ADD COLUMN media_url TEXT NOT NULL DEFAULT ''")
     if "scheduled_for" not in cols:
         conn.execute("ALTER TABLE drafts ADD COLUMN scheduled_for TEXT NOT NULL DEFAULT ''")
+    if "live_url" not in cols:
+        conn.execute("ALTER TABLE drafts ADD COLUMN live_url TEXT NOT NULL DEFAULT ''")
+    if "views" not in cols:
+        conn.execute("ALTER TABLE drafts ADD COLUMN views INTEGER NOT NULL DEFAULT 0")
+    if "engagements" not in cols:
+        conn.execute("ALTER TABLE drafts ADD COLUMN engagements INTEGER NOT NULL DEFAULT 0")
 
     # 2. Content items & versions (ThinkCentre relational schema)
     conn.execute("""
@@ -290,6 +296,13 @@ SLOP_REPLACEMENTS = {
     r"\btransformative\b": "impactful", r"\bempow\w+\b": "enable",
     r"\bfost\w+\b": "build", r"\bseamless\b": "smooth",
     r"\bstreamlin\w+\b": "simplify", r"\bdisruptiv\w+\b": "new",
+    r"\bdoors (?:just )?swung (?:wide )?open\b": "access is now available",
+    r"\breshapes? (?:app )?discovery\b": "changes app discovery",
+    r"\bgame-?chang(?:er|ing)\b": "significant update",
+    r"\bseismic shift\b": "major shift",
+    r"\bquantum leap\b": "major step",
+    r"\bmind-?blowing\b": "impressive",
+    r"\bunleash(?:ing)?\b": "releasing",
 }
 
 
@@ -733,15 +746,58 @@ def extract_article_text(url: str, max_chars: int = 4000) -> str:
 
 
 
+def verify_link_alive(link_url: str, timeout: float = 2.5) -> bool:
+    """Verifies that an external link returns an HTTP 2xx or 3xx status code."""
+    if not link_url or not link_url.startswith(("http://", "https://")):
+        return False
+    try:
+        req = urllib.request.Request(
+            link_url,
+            headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"},
+            method="HEAD"
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return 200 <= resp.status < 400
+    except Exception:
+        try:
+            req = urllib.request.Request(
+                link_url,
+                headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return 200 <= resp.status < 400
+        except Exception:
+            return False
+
+
 def deep_research_story(url: str, title: str, snippet: str = "") -> dict:
     """Agent 0: The Deep Investigator.
     
-    1. Extracts primary article text and gathers all outbound resource links.
-    2. Identifies high-value sub-links (documentation, application portals, github repos).
-    3. Shallow-scrapes top sub-links to extract concrete deadlines, eligibility, system requirements.
-    4. Compiles a rich Research Dossier with categorized links.
+    1. Extracts primary article text and gathers outbound resource links.
+    2. Verifies link health (HTTP 200 OK) so dead links never enter a post.
+    3. Identifies high-value sub-links (documentation, portals, github repos) and shallow-scrapes them.
+    4. Compiles a rich Research Dossier with verified live links and publisher credit.
     """
     primary_text = extract_article_text(url) if url else snippet or title
+    
+    # Identify publisher attribution
+    publisher = "Official Source"
+    if url:
+        domain = urllib.parse.urlparse(url).netloc.replace("www.", "")
+        known_publishers = {
+            "developer.apple.com": "Apple Developer News",
+            "apple.com": "Apple Newsroom",
+            "openai.com": "OpenAI",
+            "techcrunch.com": "TechCrunch",
+            "arstechnica.com": "Ars Technica",
+            "technologyreview.com": "MIT Technology Review",
+            "blog.google": "Google",
+            "ai.googleblog.com": "Google AI",
+            "news.ycombinator.com": "Hacker News",
+            "deepseek.com": "DeepSeek",
+            "x.ai": "xAI"
+        }
+        publisher = known_publishers.get(domain, domain)
     
     # Extract links from primary page
     links = []
@@ -759,11 +815,19 @@ def deep_research_story(url: str, title: str, snippet: str = "") -> dict:
         except Exception:
             pass
 
+    # Verify link health: only keep live links (HTTP 200 OK)
+    verified_links = []
+    for l in links[:12]:
+        if verify_link_alive(l["href"]):
+            verified_links.append(l)
+        if len(verified_links) >= 6:
+            break
+
     # Find high-value sub-links for secondary research
     sub_research_notes = []
     valuable_keywords = ("apply", "student", "challenge", "docs", "documentation", "guide", "learn", "github", "portal", "register", "api")
     researched_count = 0
-    for l in links:
+    for l in (verified_links or links):
         t_low = l["text"].lower()
         h_low = l["href"].lower()
         if any(k in t_low or k in h_low for k in valuable_keywords) and researched_count < 2:
@@ -776,22 +840,23 @@ def deep_research_story(url: str, title: str, snippet: str = "") -> dict:
                 pass
 
     # Compile the Research Dossier
-    dossier = primary_text
+    dossier = f"=== SOURCE ARTICLE ({publisher}) ===\n" + primary_text
     if sub_research_notes:
         dossier += "\n\n=== DEEP INVESTIGATION SUB-FINDINGS ===\n" + "\n\n".join(sub_research_notes)
     
-    if links:
-        dossier += "\n\n=== VERIFIED RESOURCE & ACTION LINKS ===\n"
-        for l in links[:6]:
+    if verified_links:
+        dossier += "\n\n=== VERIFIED RESOURCE & ACTION LINKS (HTTP 200 OK) ===\n"
+        for l in verified_links[:6]:
             dossier += f"• {l['text']}: {l['href']}\n"
     elif url:
-        dossier += f"\n\n=== PRIMARY SOURCE ===\n• Official Announcement: {url}\n"
+        dossier += f"\n\n=== PRIMARY SOURCE ===\n• Official Announcement ({publisher}): {url}\n"
 
     return {
         "title": title,
         "source_url": url,
+        "publisher": publisher,
         "dossier": dossier,
-        "links": links[:6]
+        "links": verified_links[:6] if verified_links else links[:6]
     }
 
 
@@ -840,18 +905,18 @@ def run_roundtable(provider_id: str, title: str, context: str, platform: str, to
     initial_draft = call_ai(provider_id, draft_prompt, drafter_sys)
     time.sleep(1.0)
 
-    # Agent 2: Fact-Checker & Anti-Hallucination Guard
+    # Agent 2: Fact-Checker & Anti-Hype Guard
     checker_sys = (
-        "You are Agent 2 (The Fact-Checker & Editor) for JustMeMedia. "
+        "You are Agent 2 (The Fact-Checker & Anti-Hype Guard) for JustMeMedia. "
         "Your job is to verify claims against the provided source facts. "
-        "Remove all buzzwords ('revolutionizing', 'game-changer', 'delve', 'unleash', 'testament'). "
-        "Ensure no fake customer stories or invented numbers exist."
+        "Strip out all overclaiming hyperbole ('doors swung wide open', 'reshapes app discovery', 'game-changer', 'delve', 'unleash', 'testament'). "
+        "Ensure version numbers, beta labels, and publisher attributions are accurate. No fake customer stories or invented metrics."
     )
     check_prompt = (
         f"Review and refine this draft based strictly on the source facts.\n"
         f"Source Facts: {context[:1800]}\n"
         f"Draft to critique and refine:\n{initial_draft}\n\n"
-        "Return the refined, fact-checked post directly."
+        "Return the refined, grounded, fact-checked post directly."
     )
     fact_checked_draft = call_ai(provider_id, check_prompt, checker_sys)
     time.sleep(1.0)
@@ -890,13 +955,19 @@ def run_roundtable(provider_id: str, title: str, context: str, platform: str, to
             final_post = format_for_linkedin(final_post)
 
     # Agent 4: Art Director (Image prompt)
-    art_sys = "You are an elite Visual Art Director creating photorealistic, modern image briefs."
+    art_sys = (
+        "You are an elite Visual Art Director creating photorealistic, modern conceptual artwork. "
+        "CRITICAL RULE: NEVER prompt generic stock photos of people staring at laptop screens or sitting in offices. "
+        "Always focus on sleek conceptual technology, system architecture, holographic schematics, or clean hardware."
+    )
     art_prompt = (
-        f"Generate a prompt for Midjourney/FLUX/Gemini to illustrate this post.\n"
-        f"Post Headline: {title}\n"
-        f"Content summary: {final_post[:300]}\n"
-        "Style: modern tech, cinematic studio lighting, dark palette with emerald/forest-green accents, photorealistic.\n"
-        "Return ONLY the image prompt (1-2 sentences)."
+        f"Generate a visual prompt for FLUX/Draw Things to illustrate this tech story.\n"
+        f"Topic: {title}\n"
+        f"Key facts: {final_post[:250]}\n"
+        "Visual style: sleek dark-mode system architecture diagram, holographic UI schematics, glowing system nodes, "
+        "minimalist hardware/silicon macro concept, or abstract technological blueprint.\n"
+        "Lighting: cinematic studio lighting, dark obsidian palette with vivid emerald-green and cyan accents, 8k photorealistic concept render.\n"
+        "Return ONLY the 1-2 sentence image prompt."
     )
     image_prompt = call_ai(provider_id, art_prompt, art_sys)
 
@@ -1084,43 +1155,47 @@ def format_for_x(text: str, max_chars: int = 280) -> str:
         return cleaned.strip()
     
     urls = re.findall(r"https?://\S+", cleaned)
-    primary_url = urls[0] if urls else ""
+    primary_url = urls[0].rstrip(".,;)") if urls else ""
     hashtags = re.findall(r"#\w+", cleaned)
     tags_str = " ".join(hashtags[:2]) if hashtags else ""
-    
+
+    if len(cleaned.strip()) <= max_chars:
+        if not primary_url or primary_url in cleaned:
+            return cleaned.strip()
+
     prose = cleaned
     for u in urls:
         prose = prose.replace(u, "")
     for h in hashtags:
         prose = prose.replace(h, "")
     prose = re.sub(r"\s+", " ", prose).strip()
-    
+
     url_len = len(primary_url) if primary_url else 0
     tag_len = len(tags_str) if tags_str else 0
     prose_budget = max_chars - (url_len + 2 if url_len else 0) - (tag_len + 2 if tag_len else 0)
-    if prose_budget < 60:
-        prose_budget = max_chars - tag_len - 4
-        primary_url = ""
-        
+    if prose_budget < 50 and primary_url:
+        # X t.co link takes ~23 chars natively, ensure prose has space
+        prose_budget = 140
+
     if len(prose) > prose_budget:
         cut = prose[:prose_budget]
         last_punct = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "))
-        if last_punct > 60:
+        if last_punct > 50:
             condensed = cut[:last_punct + 1].strip()
         else:
             last_sp = cut.rfind(" ")
-            condensed = (cut[:last_sp] if last_sp > 50 else cut).strip() + "…"
+            condensed = (cut[:last_sp] if last_sp > 40 else cut).strip() + "…"
     else:
         condensed = prose
-        
+
     parts = [condensed]
     if primary_url:
         parts.append(primary_url)
     if tags_str:
         parts.append(tags_str)
-        
+
     res = "\n\n".join(p for p in parts if p)
-    if len(res) > max_chars:
+    if len(res) > max_chars and not primary_url:
         res = res[:max_chars - 1] + "…"
     return res
 
@@ -1551,12 +1626,18 @@ textarea{min-height:160px;resize:vertical;font-family:inherit}
   <!-- COLUMN 3: STAGING & APPROVAL GATEWAY -->
   <section>
     <h2>3. Approval & Publishing Hub</h2>
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
       <div style="display:flex;gap:6px;align-items:center">
         <label style="margin:0">Saved Drafts & Queue</label>
         <span id="queueCount" style="font-size:11px;color:var(--muted)">0 items</span>
       </div>
       <button class="btn btn-secondary btn-small" onclick="toggleWebhookSettings()">⚙️ Webhooks</button>
+    </div>
+
+    <!-- QUEUE TABS: ACTIVE VS PUBLISHED ARCHIVE -->
+    <div style="display:flex;gap:6px;margin-bottom:10px">
+      <button id="tabActive" class="chip chip-active" onclick="switchQueueTab('active')">⚡ Active Queue (<span id="activeCount">0</span>)</button>
+      <button id="tabArchive" class="chip" onclick="switchQueueTab('published')">📊 Published Archive (<span id="archiveCount">0</span>)</button>
     </div>
 
     <!-- PHASE E: WEBHOOK SETTINGS PANEL -->
@@ -2289,24 +2370,113 @@ async function saveDraft() {
   }
 }
 
+function switchQueueTab(tab) {
+  window._queueTab = tab;
+  const tAct = document.getElementById('tabActive');
+  const tArc = document.getElementById('tabArchive');
+  if (tAct) tAct.classList.toggle('chip-active', tab === 'active');
+  if (tArc) tArc.classList.toggle('chip-active', tab === 'published');
+  loadDrafts();
+}
+
+async function saveMetrics(id) {
+  const live_url = (document.getElementById(`liveUrl_${id}`) || {}).value || '';
+  const views = parseInt((document.getElementById(`views_${id}`) || {}).value || '0', 10);
+  const engagements = parseInt((document.getElementById(`eng_${id}`) || {}).value || '0', 10);
+  const res = await fetch(`/api/drafts/${id}/metrics`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({live_url, views, engagements})
+  });
+  const data = await res.json();
+  if (data.ok) {
+    const toast = document.getElementById('saveToast');
+    if (toast) {
+      toast.textContent = '📊 Performance metrics saved!';
+      toast.style.color = '#9ae6b4';
+      setTimeout(() => { toast.textContent = ''; }, 3000);
+    }
+    loadDrafts();
+  }
+}
+
 async function loadDrafts() {
   const res = await fetch('/api/drafts');
   const drafts = await res.json();
   const queueEl = document.getElementById('draftsQueue');
-  document.getElementById('queueCount').textContent = `${drafts.length} items`;
-  
-  if (!drafts.length) {
-    queueEl.innerHTML = '<div style="color:var(--muted);padding:10px 0">No drafts yet. Create or generate one on the left.</div>';
-    return;
-  }
 
   window._drafts = {};
   drafts.forEach(d => { window._drafts[d.id] = d; });
 
-  queueEl.innerHTML = drafts.map(d => {
-    const statusClass = d.status === 'Approved' ? 'status-approved' : (d.status === 'Published' ? 'status-published' : 'status-draft');
+  const activeDrafts = drafts.filter(d => d.status !== 'Published');
+  const publishedDrafts = drafts.filter(d => d.status === 'Published');
+  const actCountEl = document.getElementById('activeCount');
+  const arcCountEl = document.getElementById('archiveCount');
+  if (actCountEl) actCountEl.textContent = activeDrafts.length;
+  if (arcCountEl) arcCountEl.textContent = publishedDrafts.length;
+
+  const tab = window._queueTab || 'active';
+  const displayList = tab === 'published' ? publishedDrafts : activeDrafts;
+  document.getElementById('queueCount').textContent = `${displayList.length} items`;
+
+  if (!displayList.length) {
+    queueEl.innerHTML = tab === 'published'
+      ? '<div style="color:var(--muted);padding:16px 0;text-align:center">No published stories in archive yet. Once you publish stories from the Active Queue, they will be tracked here!</div>'
+      : '<div style="color:var(--muted);padding:16px 0;text-align:center">No active drafts in queue. Pick a story from Column 1 or write one on the left.</div>';
+    return;
+  }
+
+  if (tab === 'published') {
+    queueEl.innerHTML = displayList.map(d => `
+      <div class="item-card" style="border-left: 3px solid #3182ce;background:#0d1520">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
+          <h3 style="margin:0">${escapeHtml(d.title)}</h3>
+          <span class="status-pill status-published">PUBLISHED</span>
+        </div>
+        <div class="item-meta" style="margin-top:6px">
+          <span>${escapeHtml(d.platform)}</span> · <span>Published: ${escapeHtml(d.updated_at.slice(0,16))}</span>
+        </div>
+
+        <p style="white-space:pre-wrap;line-height:1.4;max-height:120px;overflow-y:auto;background:#090d12;padding:8px;border-radius:4px;font-size:12px;margin:8px 0;border:1px solid #1a2430">${escapeHtml(d.body)}</p>
+
+        <!-- LIVE URL & 48H METRICS TRACKER -->
+        <div style="background:#142233;border:1px solid #2b6cb0;border-radius:6px;padding:8px 10px;margin:8px 0">
+          <div style="font-size:11px;color:#90cdf4;font-weight:700;margin-bottom:6px">📊 Performance & Live Post Tracking</div>
+          <div style="margin-bottom:6px">
+            <label style="font-size:10px;color:var(--muted);display:block;margin:0 0 2px">Live Post URL</label>
+            <div style="display:flex;gap:4px">
+              <input id="liveUrl_${d.id}" value="${escapeHtml(d.live_url || '')}" placeholder="Paste live post link (e.g. https://linkedin.com/...)" style="font-size:11px;padding:4px 6px;flex:1">
+              ${d.live_url ? `<a href="${escapeHtml(d.live_url)}" target="_blank" class="btn btn-small btn-secondary" style="text-decoration:none;font-size:11px">Open ↗</a>` : ''}
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:6px;align-items:flex-end">
+            <div>
+              <label style="font-size:10px;color:var(--muted);display:block;margin:0 0 2px">Views / Impressions</label>
+              <input type="number" id="views_${d.id}" value="${d.views || 0}" style="font-size:11px;padding:4px 6px;width:100%">
+            </div>
+            <div>
+              <label style="font-size:10px;color:var(--muted);display:block;margin:0 0 2px">Reactions / Comments</label>
+              <input type="number" id="eng_${d.id}" value="${d.engagements || 0}" style="font-size:11px;padding:4px 6px;width:100%">
+            </div>
+            <button class="btn btn-small" style="background:#2b6cb0;color:#fff;font-weight:700;font-size:11px;padding:5px 10px" onclick="saveMetrics(${d.id})">💾 Save Stats</button>
+          </div>
+        </div>
+
+        <div style="display:flex;gap:6px;margin-top:8px">
+          <button class="btn btn-secondary btn-small" onclick="copyDraftText(${d.id})">📋 Copy Text</button>
+          <button class="btn btn-secondary btn-small" onclick="editDraftInStudio(${d.id})">🔄 Repurpose in Studio</button>
+          <button class="btn btn-danger btn-small" onclick="deleteDraft(${d.id})">Delete</button>
+        </div>
+      </div>
+    `).join('');
+    return;
+  }
+
+  // Active Drafts Queue
+  queueEl.innerHTML = displayList.map(d => {
+    const statusClass = d.status === 'Approved' ? 'status-approved' : 'status-draft';
     return `
-      <div class="item-card" style="border-left: 3px solid ${d.status === 'Published' ? '#3182ce' : '#38a169'}">
+      <div class="item-card" style="border-left: 3px solid #38a169">
         <!-- TOP 1-CLICK LAUNCH BANNER -->
         <div style="background:#142233;border:1px solid #2b6cb0;border-radius:6px;padding:8px 10px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;gap:8px">
           <div>
@@ -2990,6 +3160,21 @@ class Handler(BaseHTTPRequestHandler):
                 with db() as conn:
                     conn.execute("UPDATE drafts SET body = ?, updated_at = ? WHERE id = ?", (body_text, stamp, draft_id))
                 self.send_json({"ok": True, "body": body_text})
+                return
+
+            # Update Draft Performance Metrics (Live URL, Views, Engagements)
+            if path.startswith("/api/drafts/") and path.endswith("/metrics"):
+                draft_id = path.split("/")[3]
+                live_url = string_field(payload, "live_url")
+                views = int(payload.get("views") or 0)
+                engagements = int(payload.get("engagements") or 0)
+                stamp = now_iso()
+                with db() as conn:
+                    conn.execute(
+                        "UPDATE drafts SET live_url = ?, views = ?, engagements = ?, updated_at = ? WHERE id = ?",
+                        (live_url, views, engagements, stamp, draft_id)
+                    )
+                self.send_json({"ok": True, "live_url": live_url, "views": views, "engagements": engagements})
                 return
 
             # Carousel Formatter
