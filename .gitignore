@@ -1,34 +1,22 @@
-# Secrets
-.env
-.env.*
-!.env.example
-*.pem
-*.key
-secrets/
-credentials/
-config/providers.json
-
-# Local databases
-*.db
-*.sqlite
-*.sqlite3
-*.db-wal
-*.db-shm
-database/local/
-
-# Backups and logs
-backups/*
-logs/*
-*.log
-
-# Python
+# Python bytecode
 __pycache__/
 *.py[cod]
-.venv/
-venv/
 
-# Operating systems and editors
+# macOS Finder metadata
 .DS_Store
-Thumbs.db
+
+# SQLite DB (optional – keep if you want versioned)
+#contentos.db
+
+# Virtual environments
+venv/
+.venv/
+
+# IDE/editor settings
 .vscode/
 .idea/
+
+# Build artefacts / logs
+build/
+Dist/
+*.log
