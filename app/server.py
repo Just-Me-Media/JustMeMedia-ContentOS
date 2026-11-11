@@ -1522,6 +1522,20 @@ textarea{min-height:160px;resize:vertical;font-family:inherit}
       <button class="chip" onclick="filterTopic('developer|SDK|API')" id="chip_dev">💻 Dev</button>
     </div>
     <input id="keywordFilter" placeholder="🔍 Filter stories by keyword…" oninput="applyFilter()" style="width:100%;margin-bottom:8px">
+    <!-- 1-CLICK TARGET PLATFORMS (multi-select) -->
+    <div style="background:var(--panel-alt);border:1px solid #2d3748;border-radius:6px;padding:8px 12px;margin-bottom:8px">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+        <label style="margin:0;font-size:12px;font-weight:700;color:#9ae6b4">✨ 1-Click produces for</label>
+        <span style="font-size:10px;color:var(--muted)">Pick any combination — one draft per platform</span>
+      </div>
+      <div id="oneClickPlatforms" style="display:flex;gap:12px;flex-wrap:wrap;margin-top:6px;font-size:12px">
+        <label style="margin:0;display:inline-flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" class="oc-platform" value="LinkedIn" checked style="accent-color:#2f855a"> LinkedIn</label>
+        <label style="margin:0;display:inline-flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" class="oc-platform" value="X" style="accent-color:#2f855a"> X / Twitter</label>
+        <label style="margin:0;display:inline-flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" class="oc-platform" value="YouTube" style="accent-color:#2f855a"> YouTube</label>
+        <label style="margin:0;display:inline-flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" class="oc-platform" value="Facebook" style="accent-color:#2f855a"> Facebook</label>
+        <label style="margin:0;display:inline-flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" class="oc-platform" value="Instagram" style="accent-color:#2f855a"> Instagram</label>
+      </div>
+    </div>
     <div id="sourcesList" style="flex:1;overflow-y:auto;max-height:420px">Loading stories…</div>
     <details style="margin-top:10px">
       <summary style="cursor:pointer;font-size:11px;color:var(--muted);font-weight:600">🚫 Rejected stories (<span id="rejectedSourcesCount">0</span>) — click to restore</summary>
@@ -1560,21 +1574,6 @@ textarea{min-height:160px;resize:vertical;font-family:inherit}
           <option value="technical_deep_dive">🛠️ Deep Technical</option>
           <option value="contrarian">🔥 Contrarian / Hot Take</option>
         </select>
-      </div>
-    </div>
-
-    <!-- 1-CLICK TARGET PLATFORMS (multi-select) -->
-    <div style="background:var(--panel-alt);border:1px solid #2d3748;border-radius:6px;padding:8px 12px;margin-top:10px">
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
-        <label style="margin:0;font-size:12px;font-weight:700;color:#9ae6b4">✨ 1-Click produces for</label>
-        <span style="font-size:10px;color:var(--muted)">Pick any combination — one draft per platform</span>
-      </div>
-      <div id="oneClickPlatforms" style="display:flex;gap:12px;flex-wrap:wrap;margin-top:6px;font-size:12px">
-        <label style="margin:0;display:inline-flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" class="oc-platform" value="LinkedIn" checked style="accent-color:#2f855a"> LinkedIn</label>
-        <label style="margin:0;display:inline-flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" class="oc-platform" value="X" style="accent-color:#2f855a"> X / Twitter</label>
-        <label style="margin:0;display:inline-flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" class="oc-platform" value="YouTube" style="accent-color:#2f855a"> YouTube</label>
-        <label style="margin:0;display:inline-flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" class="oc-platform" value="Facebook" style="accent-color:#2f855a"> Facebook</label>
-        <label style="margin:0;display:inline-flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" class="oc-platform" value="Instagram" style="accent-color:#2f855a"> Instagram</label>
       </div>
     </div>
 
