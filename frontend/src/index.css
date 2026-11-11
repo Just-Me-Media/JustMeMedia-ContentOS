@@ -1,0 +1,51 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body {
+  background: #F4F2EE;
+  color: #1A1A1A;
+  font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #E4E2DC; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #D4D2CB; }
+
+::selection { background: rgba(21,191,127,0.22); }
+
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.animate-fade-up { animation: fadeUp 0.35s ease both; }
+.animate-pulse-dot { animation: pulse-dot 1.5s ease-in-out infinite; }
+
+/* Shared component classes */
+.card {
+  @apply rounded-xl border border-edge bg-surface shadow-card;
+}
+.card-soft {
+  @apply rounded-xl bg-raised;
+}
+.btn-primary {
+  @apply inline-flex items-center gap-2 rounded-lg bg-brand-500 text-white px-4 py-2 text-[13px] font-semibold hover:bg-brand-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed;
+}
+.btn-ghost {
+  @apply inline-flex items-center gap-2 rounded-lg border border-edge bg-surface text-ink px-3 py-1.5 text-[12px] font-medium hover:bg-raised transition-colors;
+}
+.section-title {
+  @apply text-[11px] font-bold uppercase tracking-widest text-faint;
+}
+.page-title {
+  @apply text-2xl font-bold tracking-tight text-ink;
+}
