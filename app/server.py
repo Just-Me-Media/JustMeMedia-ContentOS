@@ -43,37 +43,40 @@ ALLOWED_HOSTNAMES = frozenset({"127.0.0.1", "localhost", "::1"})
 MAX_BODY_BYTES = 2_000_000
 
 
+_ENV_KEY_FALLBACK = frozenset({
+    "GROQ_API_KEY", "GEMINI_API_KEY",
+    "DRAW_THINGS_API_KEY", "DRAW_THINGS_URL",
+})
+
+
 def _load_env_fallback() -> None:
-    """Auto-load API keys from shell profile or secure keys if not in environment."""
-    candidates = [
-        Path.home() / ".secure_keys" / ".env",
-        Path.home() / ".zshrc",
-        Path.home() / ".bashrc",
-        Path.home() / ".profile",
-    ]
+    """Load API keys from a dedicated secure keys file if not already set.
+
+    Only reads ``~/.secure_keys/.env`` (the file SECURITY.md documents). Shell
+    dotfiles are intentionally NOT parsed: they mix secrets with shell config
+    and are easy to mis-parse. Set CONTENTOS_LOAD_KEYS=1 to enable; otherwise
+    use ordinary environment variables or an OS credential store.
+    """
+    if os.environ.get("CONTENTOS_LOAD_KEYS", "").strip().lower() not in ("1", "true", "yes"):
+        return
+    candidates = [Path.home() / ".secure_keys" / ".env"]
     for p in candidates:
-        if p.exists():
-            try:
-                for line in p.read_text(encoding="utf-8", errors="ignore").splitlines():
-                    line = line.strip()
-                    if line.startswith("export GROQ_API_KEY=") and not os.environ.get("GROQ_API_KEY"):
-                        val = line.split("=", 1)[1].strip("\"' ")
-                        if val:
-                            os.environ["GROQ_API_KEY"] = val
-                    elif line.startswith("export GEMINI_API_KEY=") and not os.environ.get("GEMINI_API_KEY"):
-                        val = line.split("=", 1)[1].strip("\"' ")
-                        if val:
-                            os.environ["GEMINI_API_KEY"] = val
-                    elif line.startswith("export DRAW_THINGS_API_KEY=") and not os.environ.get("DRAW_THINGS_API_KEY"):
-                        val = line.split("=", 1)[1].strip("\"' ")
-                        if val:
-                            os.environ["DRAW_THINGS_API_KEY"] = val
-                    elif line.startswith("export DRAW_THINGS_URL=") and not os.environ.get("DRAW_THINGS_URL"):
-                        val = line.split("=", 1)[1].strip("\"' ")
-                        if val:
-                            os.environ["DRAW_THINGS_URL"] = val
-            except Exception:
-                pass
+        if not p.exists():
+            continue
+        try:
+            for line in p.read_text(encoding="utf-8", errors="ignore").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                key = key.strip()
+                if key.startswith("export "):
+                    key = key[len("export "):].strip()
+                val = val.strip().strip("\"' ")
+                if key in _ENV_KEY_FALLBACK and val and not os.environ.get(key):
+                    os.environ[key] = val
+        except Exception:
+            pass
 
 
 _load_env_fallback()
@@ -166,6 +169,12 @@ def connect_db() -> sqlite3.Connection:
         conn.execute("ALTER TABLE drafts ADD COLUMN views INTEGER NOT NULL DEFAULT 0")
     if "engagements" not in cols:
         conn.execute("ALTER TABLE drafts ADD COLUMN engagements INTEGER NOT NULL DEFAULT 0")
+    if "notified_at" not in cols:
+        conn.execute("ALTER TABLE drafts ADD COLUMN notified_at TEXT NOT NULL DEFAULT ''")
+    if "auto_publish" not in cols:
+        conn.execute("ALTER TABLE drafts ADD COLUMN auto_publish INTEGER NOT NULL DEFAULT 0")
+    if "tags" not in cols:
+        conn.execute("ALTER TABLE drafts ADD COLUMN tags TEXT NOT NULL DEFAULT ''")
 
     # 2. Content items & versions (ThinkCentre relational schema)
     conn.execute("""
@@ -233,6 +242,92 @@ def connect_db() -> sqlite3.Connection:
         )
     """)
 
+    # 6. Rejected / dismissed sources (user dismissed an article they do not want)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS rejected_sources (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            url TEXT NOT NULL,
+            title TEXT NOT NULL DEFAULT '',
+            rejected_at TEXT NOT NULL,
+            UNIQUE(url)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_rejected_url ON rejected_sources(url)")
+
+    # 7. GitHub trending repos (daily snapshot for the weekly Top 10)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS github_repos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            full_name TEXT NOT NULL,
+            url TEXT NOT NULL,
+            description TEXT,
+            stars INTEGER NOT NULL DEFAULT 0,
+            language TEXT,
+            fetched_at TEXT NOT NULL,
+            category TEXT NOT NULL DEFAULT 'General',
+            UNIQUE(url, fetched_at)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_github_fetched ON github_repos(fetched_at)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_github_stars ON github_repos(stars)")
+
+    # 10. Draft versions (version history for revert)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS draft_versions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            draft_id INTEGER NOT NULL,
+            version_number INTEGER NOT NULL DEFAULT 1,
+            title TEXT NOT NULL DEFAULT '',
+            body TEXT NOT NULL DEFAULT '',
+            platform TEXT NOT NULL DEFAULT 'General',
+            image_prompt TEXT NOT NULL DEFAULT '',
+            tags TEXT NOT NULL DEFAULT '',
+            saved_at TEXT NOT NULL,
+            FOREIGN KEY (draft_id) REFERENCES drafts(id) ON DELETE CASCADE
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_versions_draft ON draft_versions(draft_id)")
+
+    # 11. Activity log (audit trail)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS activity_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            action TEXT NOT NULL,
+            entity_type TEXT NOT NULL DEFAULT '',
+            entity_id INTEGER,
+            details TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_activity_created ON activity_log(created_at)")
+
+    # 9. Templates table (reusable composer presets)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS templates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            platform TEXT NOT NULL DEFAULT 'General',
+            title_template TEXT NOT NULL DEFAULT '',
+            body_template TEXT NOT NULL DEFAULT '',
+            image_prompt_template TEXT NOT NULL DEFAULT '',
+            tags TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+
+    # 8. Weekly Top 10 issue log (prevents regenerating the same weekly bundle)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS github_top10_issues (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            week_start TEXT NOT NULL,
+            generated_at TEXT NOT NULL,
+            draft_ids TEXT NOT NULL,
+            platform TEXT NOT NULL DEFAULT 'LinkedIn',
+            UNIQUE(week_start, platform)
+        )
+    """)
+
     conn.commit()
     return conn
 
@@ -249,6 +344,17 @@ def db() -> Iterator[sqlite3.Connection]:
     finally:
         conn.close()
 
+
+def log_activity(action: str, entity_type: str = "", entity_id: int = None, details: str = "") -> None:
+    """Log an activity to the audit trail."""
+    try:
+        with db() as conn:
+            conn.execute(
+                "INSERT INTO activity_log(action, entity_type, entity_id, details, created_at) VALUES(?,?,?,?,?)",
+                (action, entity_type, entity_id, details[:500], now_iso())
+            )
+    except Exception:
+        pass
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -1010,7 +1116,8 @@ def check_scheduled_drafts() -> list[dict]:
                    FROM drafts 
                    WHERE scheduled_for != '' 
                      AND scheduled_for <= ? 
-                     AND status IN ('Draft', 'Approved')""",
+                     AND status IN ('Draft', 'Approved')
+                     AND (notified_at IS NULL OR notified_at = '')""",
                 (now_str,)
             )
             rows = [dict(r) for r in cur.fetchall()]
@@ -1020,27 +1127,78 @@ def check_scheduled_drafts() -> list[dict]:
             if draft_id not in _NOTIFIED_SCHEDULED_DRAFTS:
                 _NOTIFIED_SCHEDULED_DRAFTS.add(draft_id)
                 notified.append(r)
+                # Persist notification state so it survives server restarts
+                with db() as conn:
+                    conn.execute("UPDATE drafts SET notified_at = ? WHERE id = ?", (now_iso(), draft_id))
                 msg = f"Time to publish '{r['title'][:40]}' on {r['platform']}! (Scheduled for {r['scheduled_for']})"
                 print(f"[ContentOS Scheduler] ⏰ {msg}")
-                # 1. Native Mac Desktop Notification
-                if sys.platform == "darwin":
+                # Notifications (disabled by default — set NOTIFICATIONS_ENABLED = True to re-enable)
+                if NOTIFICATIONS_ENABLED:
+                    # 1. Native Mac Desktop Notification
+                    if sys.platform == "darwin":
+                        try:
+                            safe_title = r['title'][:40].replace('"', '\\"').replace("'", "")
+                            safe_msg = f"Scheduled for {r['platform']} ({r['scheduled_for']})".replace('"', '\\"').replace("'", "")
+                            subprocess.run(
+                                ["osascript", "-e", f'tell application "System Events" to display notification "{safe_msg}" with title "ContentOS: Time to Post!" subtitle "{safe_title}" sound name "Glass"'],
+                                capture_output=True, timeout=2
+                            )
+                        except Exception:
+                            pass
+                    # 2. Webhook notification if configured
                     try:
-                        safe_title = r['title'][:40].replace('"', '\"').replace("'", "")
-                        safe_msg = f"Scheduled for {r['platform']} ({r['scheduled_for']})".replace('"', '\"').replace("'", "")
-                        subprocess.run(
-                            ["osascript", "-e", f'display notification "{safe_msg}" with title "ContentOS: Time to Post!" subtitle "{safe_title}" sound name "Glass"'],
-                            capture_output=True, timeout=2
-                        )
+                        cfg = get_webhook_config()
+                        alert_draft = {
+                            "title": f"⏰ Time to Post: {r['title']}",
+                            "body": f"This post was scheduled for {r['scheduled_for']} on {r['platform']}. Open ContentOS to publish!",
+                            "platform": r["platform"],
+                            "status": r["status"]
+                        }
+                        if cfg.get("discord"):
+                            send_webhook(cfg["discord"], build_discord_payload(alert_draft))
+                        if cfg.get("slack"):
+                            send_webhook(cfg["slack"], build_slack_payload(alert_draft))
                     except Exception:
                         pass
-                # 2. Webhook notification if configured
+    except Exception as e:
+        print(f"[ContentOS Scheduler Error] {e}")
+    return notified
+
+def auto_publish_scheduled_drafts() -> list[dict]:
+    """Auto-publish drafts that have reached their scheduled time and have auto_publish enabled."""
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    published = []
+    try:
+        with db() as conn:
+            cur = conn.execute(
+                """SELECT id, title, platform, scheduled_for, status, auto_publish
+                   FROM drafts
+                   WHERE scheduled_for != ''
+                     AND scheduled_for <= ?
+                     AND status IN ('Draft', 'Approved')
+                     AND auto_publish = 1""",
+                (now_str,)
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+
+        for r in rows:
+            draft_id = r["id"]
+            with db() as conn:
+                conn.execute(
+                    "UPDATE drafts SET status = 'Published', live_url = ?, updated_at = ? WHERE id = ?",
+                    (f"auto-published-{now_iso()}", now_iso(), draft_id)
+                )
+            published.append(r)
+            print(f"[ContentOS Auto-Publish] ✅ Published '{r['title'][:40]}' on {r['platform']} (scheduled for {r['scheduled_for']})")
+            # Send webhook notification if enabled
+            if NOTIFICATIONS_ENABLED:
                 try:
                     cfg = get_webhook_config()
                     alert_draft = {
-                        "title": f"⏰ Time to Post: {r['title']}",
-                        "body": f"This post was scheduled for {r['scheduled_for']} on {r['platform']}. Open ContentOS to publish!",
+                        "title": f"🚀 Auto-Published: {r['title']}",
+                        "body": f"Automatically published to {r['platform']} at {r['scheduled_for']}.",
                         "platform": r["platform"],
-                        "status": r["status"]
+                        "status": "Published"
                     }
                     if cfg.get("discord"):
                         send_webhook(cfg["discord"], build_discord_payload(alert_draft))
@@ -1049,19 +1207,90 @@ def check_scheduled_drafts() -> list[dict]:
                 except Exception:
                     pass
     except Exception as e:
-        print(f"[ContentOS Scheduler Error] {e}")
-    return notified
+        print(f"[ContentOS Auto-Publish Error] {e}")
+    return published
 
 def _scheduler_loop() -> None:
     while True:
         try:
             check_scheduled_drafts()
+            auto_publish_scheduled_drafts()
         except Exception:
             pass
-        time.sleep(30)
+        time.sleep(60)
 
 def start_scheduler_daemon() -> None:
     t = threading.Thread(target=_scheduler_loop, daemon=True, name="ContentOS-Scheduler")
+    t.start()
+
+
+def calculate_next_scrape_time() -> datetime:
+    """Calculate the next 6:30 AM scrape time."""
+    now = datetime.now()
+    today_630am = now.replace(hour=6, minute=30, second=0, microsecond=0)
+    if now < today_630am:
+        return today_630am
+    from datetime import timedelta
+    return (now + timedelta(days=1)).replace(hour=6, minute=30, second=0, microsecond=0)
+
+
+def _daily_scrape_loop() -> None:
+    """Background loop that runs the content scraper at 6:30 AM daily."""
+    import subprocess as _sp
+    while True:
+        next_run = calculate_next_scrape_time()
+        wait_seconds = (next_run - datetime.now()).total_seconds()
+        if wait_seconds > 0:
+            print(f"[ContentOS Daily Scraper] Next scrape scheduled for {next_run.strftime('%Y-%m-%d %H:%M')}")
+            time.sleep(wait_seconds)
+        # Run the worker cycle
+        try:
+            project_root = Path(__file__).resolve().parent.parent
+            worker_path = project_root / "app" / "worker.py"
+            print(f"[ContentOS Daily Scraper] ⏰ Starting 6:30 AM content scrape...")
+            result = _sp.run(
+                [sys.executable, str(worker_path), "--once"],
+                capture_output=True, text=True, timeout=600,
+                cwd=str(project_root)
+            )
+            if result.returncode == 0:
+                print(f"[ContentOS Daily Scraper] ✅ Scrape completed successfully")
+                if NOTIFICATIONS_ENABLED and sys.platform == "darwin":
+                    try:
+                        subprocess.run(
+                            ["osascript", "-e", 'tell application "System Events" to display notification "Fresh content queued for your review" with title "ContentOS: Daily Scrape Complete" sound name "Glass"'],
+                            capture_output=True, timeout=2
+                        )
+                    except Exception:
+                        pass
+            else:
+                print(f"[ContentOS Daily Scraper] ⚠️ Scrape exited with code {result.returncode}")
+                if result.stderr:
+                    print(f"[ContentOS Daily Scraper] stderr: {result.stderr[:500]}")
+                if NOTIFICATIONS_ENABLED and sys.platform == "darwin":
+                    try:
+                        subprocess.run(
+                            ["osascript", "-e", 'tell application "System Events" to display notification "Check logs for details" with title "ContentOS: Scrape Failed" sound name "Basso"'],
+                            capture_output=True, timeout=2
+                        )
+                    except Exception:
+                        pass
+        except Exception as exc:
+            print(f"[ContentOS Daily Scraper Error] {exc}")
+            if NOTIFICATIONS_ENABLED and sys.platform == "darwin":
+                try:
+                    subprocess.run(
+                        ["osascript", "-e", 'tell application "System Events" to display notification "Check logs for details" with title "ContentOS: Scrape Error" sound name "Basso"'],
+                        capture_output=True, timeout=2
+                    )
+                except Exception:
+                    pass
+        # Sleep a bit to avoid re-triggering
+        time.sleep(60)
+
+
+def start_daily_scrape_daemon() -> None:
+    t = threading.Thread(target=_daily_scrape_loop, daemon=True, name="ContentOS-DailyScraper")
     t.start()
 
 
@@ -1126,7 +1355,7 @@ def format_as_thread(post_text: str, max_tweet_len: int = 270) -> list[str]:
     total = len(raw_tweets)
     if total <= 1:
         t = raw_tweets[0] if raw_tweets else clean_text
-        return [t[:280]]
+        return [t[:max_tweet_len]]
 
     final_tweets = []
     for i, tw in enumerate(raw_tweets):
@@ -1158,10 +1387,6 @@ def format_for_x(text: str, max_chars: int = 280) -> str:
     primary_url = urls[0].rstrip(".,;)") if urls else ""
     hashtags = re.findall(r"#\w+", cleaned)
     tags_str = " ".join(hashtags[:2]) if hashtags else ""
-
-    if len(cleaned.strip()) <= max_chars:
-        if not primary_url or primary_url in cleaned:
-            return cleaned.strip()
 
     prose = cleaned
     for u in urls:
@@ -1300,1562 +1525,161 @@ def fetch_rss_feed(url: str, limit: int = 8) -> list[dict]:
                 link = link_el.attrib.get("href", "") if link_el is not None else ""
                 summary = entry.findtext("{http://www.w3.org/2005/Atom}summary") or ""
                 items.append({"title": title.strip(), "url": link.strip(), "snippet": summary[:240]})
-        return items if items else FALLBACK_STORIES
+        return filter_rejected_sources(items) if items else FALLBACK_STORIES
     except Exception:
         return FALLBACK_STORIES
 
 
-HTML = r"""<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>JustMeMedia ContentOS</title>
-<style>
-:root{color-scheme:dark;--bg:#0c110e;--panel:#141b16;--panel-alt:#1b251f;--line:#28382e;--accent:#48bb78;--accent-hover:#38a169;--text:#edf3ee;--muted:#9cb0a2;--danger:#e53e3e;--warning:#ecc94b;--purple:#9f7aea}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,sans-serif}
-header{padding:18px 28px;border-bottom:1px solid var(--line);background:#101712;display:flex;justify-content:space-between;align-items:center}
-header .brand{font-size:20px;font-weight:700;letter-spacing:.3px;color:#fff}
-header .brand span{color:var(--accent)}
-header .tagline{font-size:12px;color:var(--muted);margin-left:12px}
-.nav-links{display:flex;gap:10px}
-.nav-btn{background:transparent;border:1px solid var(--line);color:var(--text);padding:6px 12px;border-radius:6px;cursor:pointer;font-size:12px}
-.nav-btn:hover{background:var(--panel-alt);border-color:var(--accent)}
-main{max-width:1440px;margin:22px auto;padding:0 24px;display:grid;grid-template-columns:360px minmax(0,1.2fr) 360px;gap:20px}
-@media(max-width:1150px){main{grid-template-columns:1fr 1fr}}
-@media(max-width:780px){main{grid-template-columns:1fr}}
-section{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px;display:flex;flex-direction:column}
-h2{font-size:15px;text-transform:uppercase;letter-spacing:.5px;margin:0 0 14px;color:var(--accent);display:flex;align-items:center;justify-content:space-between}
-label{display:block;color:var(--muted);font-size:12px;margin:10px 0 4px;font-weight:600}
-input,textarea,select{width:100%;background:#0c120e;color:var(--text);border:1px solid var(--line);border-radius:6px;padding:8px 10px;font:inherit;font-size:13px}
-input:focus,textarea:focus,select:focus{border-color:var(--accent);outline:none}
-textarea{min-height:160px;resize:vertical;font-family:inherit}
-.btn{background:var(--accent);color:#08130b;border:0;border-radius:6px;padding:9px 14px;font-weight:700;font-size:13px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:6px;transition:.15s}
-.btn:hover{background:var(--accent-hover)}
-.btn-secondary{background:var(--panel-alt);color:var(--text);border:1px solid var(--line)}
-.btn-secondary:hover{background:#233129;border-color:var(--muted)}
-.btn-purple{background:var(--purple);color:#fff}
-.btn-purple:hover{background:#805ad5}
-.btn-small{padding:5px 9px;font-size:11px;border-radius:4px}
-.btn-approve{background:#2b6cb0;color:#fff}
-.btn-approve:hover{background:#2c5282}
-.btn-danger{background:transparent;border:1px solid #742a2a;color:#feb2b2}
-.btn-danger:hover{background:#742a2a;color:#fff}
-.status-pill{font-size:10px;text-transform:uppercase;letter-spacing:.5px;padding:2px 7px;border-radius:10px;font-weight:700}
-.status-draft{background:#2d3748;color:#cbd5e0}
-.status-approved{background:#22543d;color:#9ae6b4}
-.status-published{background:#2c5282;color:#bee3f8}
-.chip{background:var(--panel-alt);border:1px solid var(--line);color:var(--muted);padding:3px 10px;border-radius:12px;font-size:11px;cursor:pointer;transition:all .15s}
-.chip:hover{border-color:#4a5568;color:var(--text)}
-.chip-active{background:#22543d;border-color:#2f855a;color:#9ae6b4;font-weight:700}
-.scheduled-pill{font-size:10px;background:#1a202c;border:1px solid #4a5568;color:#90cdf4;padding:2px 7px;border-radius:10px;font-weight:600;display:inline-flex;align-items:center;gap:4px}
-.slot-select{background:var(--panel);border:1px solid var(--line);color:var(--text);font-size:11px;padding:3px 6px;border-radius:4px;outline:none;cursor:pointer}
-.item-card{background:var(--panel-alt);border:1px solid var(--line);border-radius:8px;padding:12px;margin-bottom:12px;position:relative}
-.item-card h3{margin:0 0 6px;font-size:14px;color:#fff;word-break:break-word}
-.item-meta{font-size:11px;color:var(--muted);display:flex;align-items:center;gap:8px;margin-bottom:8px}
-.item-card p{margin:0 0 10px;font-size:13px;color:#d2ded5;white-space:pre-wrap;max-height:120px;overflow:hidden;text-overflow:ellipsis}
-.image-prompt-box{background:#0c120e;border:1px dashed #354a3e;border-radius:6px;padding:10px;margin:8px 0;font-size:12px;color:#9ae6b4}
-.roundtable-badge{background:#2d1d3a;border:1px solid var(--purple);color:#d6bcfa;padding:3px 8px;border-radius:4px;font-size:11px;margin-bottom:8px;display:inline-block}
-.char-counter{font-size:11px;color:var(--muted);text-align:right;margin-top:4px}
-.char-counter.limit-exceeded{color:var(--danger);font-weight:700}
-.toast{min-height:22px;font-size:12px;color:var(--accent);margin-top:8px}
-.source-item{padding:10px 0;border-top:1px solid var(--line);font-size:12px}
-.source-item:first-child{border-top:0}
-.source-item a{color:#9ae6b4;text-decoration:none;font-weight:600}
-.source-item a:hover{text-decoration:underline}
-.composer-links{display:flex;gap:6px;margin-top:8px}
-.gif-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:8px;max-height:160px;overflow-y:auto}
-.gif-grid img{width:100%;height:75px;object-fit:cover;border-radius:4px;cursor:pointer;border:1px solid transparent}
-.gif-grid img:hover{border-color:var(--accent)}
-.carousel-preview{background:var(--panel-alt);border:1px solid var(--line);border-radius:8px;padding:12px;margin-top:10px}
-.carousel-slide{background:#0c120e;border:1px solid var(--accent);border-radius:6px;padding:12px;margin-bottom:8px}
-.carousel-slide-num{font-size:10px;color:var(--accent);font-weight:700;text-transform:uppercase;margin-bottom:4px}
-.carousel-slide h4{margin:0 0 6px;font-size:14px;color:#fff}
-.carousel-slide p{margin:0;font-size:12px;color:var(--muted);white-space:pre-wrap}
-.webhook-row{display:flex;gap:8px;margin-top:6px;align-items:center}
-.draw-things-status{font-size:11px;padding:3px 8px;border-radius:4px;display:inline-block}
-.dt-online{background:#22543d;color:#9ae6b4}
-.dt-offline{background:#742a2a;color:#feb2b2}
-.omni-bundle{background:var(--panel-alt);border:1px solid var(--purple);border-radius:8px;padding:12px;margin-top:10px}
-.omni-platform-tab{padding:6px 12px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;border:1px solid var(--line);background:transparent;color:var(--muted)}
-.omni-platform-tab.active{background:var(--accent);color:#08130b;border-color:var(--accent)}
-.omni-tab-content{background:#0c120e;border:1px solid #354a3e;border-radius:6px;padding:10px;margin-top:6px;font-size:12px;color:#d2ded5;white-space:pre-wrap;max-height:180px;overflow-y:auto}
-
-.pipeline-modal-backdrop {
-  position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
-  background: rgba(0, 0, 0, 0.78); backdrop-filter: blur(5px);
-  display: flex; align-items: center; justify-content: center;
-  z-index: 99999;
-}
-.pipeline-modal {
-  background: #111418; border: 1px solid #2d3748; border-radius: 12px;
-  width: 90%; max-width: 520px; padding: 24px; box-shadow: 0 20px 45px rgba(0,0,0,0.85);
-  color: #fff; font-family: inherit;
-}
-.modal-step {
-  display: flex; align-items: center; gap: 12px; padding: 10px 14px;
-  background: #1a202c; border: 1px solid #2d3748; border-radius: 8px; margin-bottom: 8px;
-  font-size: 13px; transition: all .2s; color: #a0aec0;
-}
-.modal-step.active {
-  border-color: #319795; background: #17282c; color: #81e6d9; font-weight: 600;
-}
-.modal-step.done {
-  border-color: #276749; background: #14291e; color: #9ae6b4;
-}
-.action-banner {
-  background: #1a365d; border: 1px solid #2b6cb0; border-radius: 6px;
-  padding: 8px 12px; margin: 8px 0; display: flex; justify-content: space-between;
-  align-items: center; gap: 8px; flex-wrap: wrap;
-}
-
-</style>
-</head>
-<body>
-<header>
-  <div>
-    <span class="brand">JustMe<span>Media</span> ContentOS</span>
-    <span class="tagline">Local-First Content Engine & Multimodal Publishing Studio</span>
-  </div>
-  <div class="nav-links">
-    <button class="nav-btn" onclick="exportDraftsJson()">Export JSON</button>
-    <button class="nav-btn" onclick="exportAllMarkdown()">Export All Markdown</button>
-  </div>
-</header>
-
-<main>
-  <!-- COLUMN 1: DISCOVERY & INTAKE -->
-  <section>
-    <h2>1. Content Discovery <span style="font-size:11px;font-weight:normal;color:var(--muted)">Verified Sources + RSS</span></h2>
-    <label for="rssPreset">Curated Verified Sources</label>
-    <select id="rssPreset" onchange="fetchFeed(this.value)">
-      <optgroup label="🍎 Apple (Official)">
-        <option value="https://developer.apple.com/news/rss/news.rss">Apple Developer News ✅</option>
-        <option value="https://www.apple.com/newsroom/rss-feed.rss">Apple Newsroom ✅</option>
-      </optgroup>
-      <optgroup label="🔵 Google (Official)">
-        <option value="https://blog.google/technology/ai/rss/">Google AI Blog ✅</option>
-        <option value="https://blog.google/rss/">Google The Keyword ✅</option>
-      </optgroup>
-      <optgroup label="🤖 AI Labs">
-        <option value="https://openai.com/news/rss.xml">OpenAI News ✅</option>
-        <option value="https://techcrunch.com/tag/anthropic/feed/">Anthropic (via TechCrunch) ✅</option>
-        <option value="https://techcrunch.com/tag/deepseek/feed/">DeepSeek (via TechCrunch) ✅</option>
-        <option value="https://techcrunch.com/tag/xai/feed/">xAI / Grok (via TechCrunch) ✅</option>
-        <option value="https://techcrunch.com/tag/meta-ai/feed/">Meta AI (via TechCrunch) ✅</option>
-        <option value="https://techcrunch.com/tag/microsoft-ai/feed/">Microsoft AI (via TechCrunch) ✅</option>
-      </optgroup>
-      <optgroup label="📰 Tech & AI News">
-        <option value="https://news.ycombinator.com/rss">Hacker News Top Stories</option>
-        <option value="https://hnrss.org/frontpage">Hacker News Frontpage</option>
-        <option value="https://feeds.arstechnica.com/arstechnica/index">Ars Technica Tech & AI</option>
-        <option value="https://www.technologyreview.com/topic/artificial-intelligence/feed/">MIT Technology Review AI</option>
-        <option value="https://techcrunch.com/category/artificial-intelligence/feed/">TechCrunch AI</option>
-        <option value="https://rss.nytimes.com/services/xml/rss/nyt/Technology.xml">NYT Technology News</option>
-      </optgroup>
-    </select>
-    <div style="display:flex;gap:6px;margin-top:8px">
-      <input id="customRss" placeholder="Paste custom RSS/Atom URL">
-      <button class="btn btn-secondary btn-small" onclick="fetchFeed(document.getElementById('customRss').value)">Load</button>
-    </div>
-
-    <div style="margin-top:12px;background:var(--panel-alt);padding:10px;border-radius:6px;border:1px solid var(--line)">
-      <div style="display:flex;justify-content:space-between;align-items:center">
-        <label style="margin:0">⚡ Autopilot Batch</label>
-        <button id="btnAutopilot" class="btn btn-purple btn-small" onclick="runAutopilot()">Draft Top 3 Stories</button>
-      </div>
-      <p style="margin:4px 0 0;font-size:11px;color:var(--muted)">Auto-extracts full articles & runs Roundtable agents on top 3 headlines.</p>
-    </div>
-    
-    <label style="margin-top:16px">Top Stories & Trends</label>
-    <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap" id="topicChips">
-      <button class="chip chip-active" onclick="filterTopic('')" id="chip_all">🌐 All</button>
-      <button class="chip" onclick="filterTopic('AI')" id="chip_ai">🤖 AI</button>
-      <button class="chip" onclick="filterTopic('Apple')" id="chip_apple">🍎 Apple</button>
-      <button class="chip" onclick="filterTopic('Google')" id="chip_google">🔵 Google</button>
-      <button class="chip" onclick="filterTopic('OpenAI')" id="chip_openai">OpenAI</button>
-      <button class="chip" onclick="filterTopic('Claude|Anthropic')" id="chip_anthropic">Anthropic</button>
-      <button class="chip" onclick="filterTopic('DeepSeek')" id="chip_deepseek">DeepSeek</button>
-      <button class="chip" onclick="filterTopic('Grok|xAI')" id="chip_xai">xAI/Grok</button>
-      <button class="chip" onclick="filterTopic('developer|SDK|API')" id="chip_dev">💻 Dev</button>
-    </div>
-    <input id="keywordFilter" placeholder="🔍 Filter stories by keyword…" oninput="applyFilter()" style="width:100%;margin-bottom:8px">
-    <div id="sourcesList" style="flex:1;overflow-y:auto;max-height:420px">Loading stories…</div>
-  </section>
-
-  <!-- COLUMN 2: DRAFTING & AI ENGINE -->
-  <section>
-    <h2>2. Content Engine & AI Studio</h2>
-    
-    <label for="aiProvider">Select Intelligence Provider</label>
-    <select id="aiProvider"></select>
-    
-    <div style="margin-top:6px">
-      <label for="draftTitle">Headline / Working Title</label>
-      <input id="draftTitle" required placeholder="e.g. Why Local AI is Winning">
-    </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:6px">
-      <div>
-        <label for="draftPlatform">Platform</label>
-        <select id="draftPlatform" onchange="updateCharCount()">
-          <option value="LinkedIn">LinkedIn (Exec Post)</option>
-          <option value="X">X (Twitter Thread/Hook)</option>
-          <option value="YouTube">YouTube (Hub & Full Brief)</option>
-          <option value="Facebook">Facebook (Long-Form Guide)</option>
-          <option value="Instagram">Instagram/Threads</option>
-          <option value="General">General Draft</option>
-        </select>
-      </div>
-      <div>
-        <label for="draftTone">Editorial Tone / Persona</label>
-        <select id="draftTone">
-          <option value="thought_leadership">🎯 Thought Leadership</option>
-          <option value="viral_story">⚡ Viral & Punchy</option>
-          <option value="technical_deep_dive">🛠️ Deep Technical</option>
-          <option value="contrarian">🔥 Contrarian / Hot Take</option>
-        </select>
-      </div>
-    </div>
-
-    <!-- AGENT 0: DEEP RESEARCH TOGGLE -->
-    <div style="background:var(--panel-alt);border:1px solid #2d3748;border-radius:6px;padding:8px 12px;margin-top:10px;display:flex;align-items:center;justify-content:space-between">
-      <div>
-        <label style="margin:0;font-size:12px;font-weight:700;color:#9ae6b4;display:flex;align-items:center;gap:6px">
-          <input type="checkbox" id="deepResearchToggle" checked style="accent-color:#2f855a">
-          🔬 Agent 0: Deep Research Enrichment
-        </label>
-        <div style="font-size:10px;color:var(--muted);margin-top:2px">Scrapes sub-portals, docs & application forms for 360° coverage</div>
-      </div>
-      <span style="font-size:10px;background:#14291e;border:1px solid #22543d;color:#9ae6b4;padding:2px 6px;border-radius:4px;font-weight:600">Active</span>
-    </div>
-
-    <!-- PIPELINE MODE SELECTOR -->
-    <div style="display:flex;gap:12px;align-items:center;margin-top:10px;background:var(--panel-alt);padding:8px 12px;border-radius:6px;border:1px solid var(--line)">
-      <label style="margin:0;cursor:pointer;display:flex;align-items:center;gap:6px">
-        <input type="checkbox" id="chkRoundtable" checked style="width:auto"> 🤖 <strong>Roundtable Mode (3 Agents)</strong>
-      </label>
-      <span style="font-size:11px;color:var(--muted)">Drafter ➔ Fact-Checker ➔ Hook Optimizer</span>
-    </div>
-
-    <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
-      <button id="btnAiDraft" class="btn btn-secondary" onclick="generateAiDraft()">⚡ Generate Post</button>
-      <button id="btnAiVisual" class="btn btn-secondary" onclick="generateImagePrompt()">🎨 Suggest Image Prompt</button>
-      <button id="btnGenImage" class="btn btn-secondary" onclick="generateLocalImage()">🖼️ Draw Things (Local AI)</button>
-    </div>
-    <div id="dtStatus" style="margin-top:4px;font-size:11px;color:var(--muted)">Checking Draw Things…</div>
-    <div id="generatedImagePreview" style="margin-top:8px;display:none">
-      <img id="generatedImg" style="width:100%;border-radius:6px;border:1px solid var(--line)" alt="Generated image">
-      <button class="btn btn-secondary btn-small" style="margin-top:4px" onclick="attachGeneratedImage()">📎 Attach to Draft</button>
-    </div>
-    
-    <label for="draftBody" style="margin-top:12px">Post Body & Formatting</label>
-    <textarea id="draftBody" oninput="updateCharCount()" placeholder="Write post or generate with AI..."></textarea>
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px">
-      <div style="display:flex;gap:6px">
-        <button class="btn btn-secondary btn-small" onclick="formatThread()">🧵 Split X Thread</button>
-        <button class="btn btn-secondary btn-small" onclick="formatCarousel()">📑 Split Carousel</button>
-      </div>
-      <div id="charCounter" class="char-counter" style="margin-top:0">0 characters</div>
-    </div>
-
-    <!-- PHASE D: CAROUSEL VISUAL SLIDE PREVIEW -->
-    <div id="carouselPreview" class="carousel-preview" style="display:none">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-        <label style="margin:0">📑 Carousel Slide Preview</label>
-        <button class="btn btn-small btn-secondary" onclick="document.getElementById('carouselPreview').style.display='none'">✕</button>
-      </div>
-      <div id="carouselSlides"></div>
-    </div>
-
-    <!-- PHASE A: OMNI-PLATFORM REPURPOSING BUNDLE -->
-    <div class="omni-bundle" style="margin-top:12px">
-      <div style="display:flex;justify-content:space-between;align-items:center">
-        <label style="margin:0;color:var(--purple)">🚀 Omni-Platform Repurposing</label>
-        <button id="btnOmni" class="btn btn-purple btn-small" onclick="generateOmniBundle()">Generate All Platforms</button>
-      </div>
-      <p style="margin:4px 0 8px;font-size:11px;color:var(--muted)">1 story ➔ LinkedIn post + X Thread + YouTube Brief simultaneously</p>
-      <div id="omniBundleTabs" style="display:none">
-        <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap">
-          <button class="omni-platform-tab active" onclick="showOmniTab('linkedin', this)">LinkedIn</button>
-          <button class="omni-platform-tab" onclick="showOmniTab('x', this)">X Thread</button>
-          <button class="omni-platform-tab" onclick="showOmniTab('youtube', this)">YouTube Hub</button>
-          <button class="omni-platform-tab" onclick="showOmniTab('facebook', this)">Facebook Guide</button>
-        </div>
-        <div id="omniLinkedin" class="omni-tab-content"></div>
-        <div id="omniX" class="omni-tab-content" style="display:none"></div>
-        <div id="omniYoutube" class="omni-tab-content" style="display:none"></div>
-        <div id="omniFacebook" class="omni-tab-content" style="display:none"></div>
-        <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
-          <button class="btn btn-small btn-secondary" onclick="loadOmniToDraft('linkedin')">Load LinkedIn</button>
-          <button class="btn btn-small btn-secondary" onclick="loadOmniToDraft('x')">Load X</button>
-          <button class="btn btn-small btn-secondary" onclick="loadOmniToDraft('youtube')">Load YouTube</button>
-          <button class="btn btn-small btn-secondary" onclick="loadOmniToDraft('facebook')">Load Facebook</button>
-          <button class="btn btn-small" style="background:#44337a;color:#d6bcfa;border:1px solid #6b46c1;font-weight:700" onclick="saveOmniBundle()">💾 Save All 4 Funnel Drafts</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- MULTIMODAL MEDIA STUDIO (GIF SEARCH & VISUAL PROMPTS) -->
-    <div style="background:var(--panel-alt);padding:10px;border-radius:6px;border:1px solid var(--line);margin-top:10px">
-      <div style="display:flex;justify-content:space-between;align-items:center">
-        <label style="margin:0">🎬 Media Studio & GIF Search</label>
-        <span style="font-size:11px;color:var(--muted)">Click a GIF to attach</span>
-      </div>
-      <div style="display:flex;gap:6px;margin-top:6px">
-        <input id="gifSearchQuery" placeholder="Search GIFs (e.g. tech, mind blown, coding)..." onkeydown="if(event.key==='Enter') searchGifs()">
-        <button class="btn btn-secondary btn-small" onclick="searchGifs()">Find</button>
-      </div>
-      <div id="gifResults" class="gif-grid"></div>
-      <div id="attachedMediaPreview" style="margin-top:6px;display:none;font-size:11px;color:var(--accent)">
-        Attached GIF: <span id="attachedMediaUrl"></span>
-        <button class="btn btn-danger btn-small" style="margin-left:8px" onclick="clearAttachedMedia()">Remove</button>
-      </div>
-    </div>
-
-    <label for="draftImagePrompt" style="margin-top:12px">Generated Artwork Brief (for Gemini, FLUX, Grok, Midjourney)</label>
-    <textarea id="draftImagePrompt" style="min-height:65px" placeholder="AI visual generation prompt..."></textarea>
-    
-    <input type="hidden" id="draftSourceUrl">
-    <input type="hidden" id="draftMediaUrl">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px">
-      <button class="btn" onclick="saveDraft()">💾 Save Draft</button>
-      <span id="saveToast" class="toast"></span>
-    </div>
-  </section>
-
-  <!-- COLUMN 3: STAGING & APPROVAL GATEWAY -->
-  <section>
-    <h2>3. Approval & Publishing Hub</h2>
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-      <div style="display:flex;gap:6px;align-items:center">
-        <label style="margin:0">Saved Drafts & Queue</label>
-        <span id="queueCount" style="font-size:11px;color:var(--muted)">0 items</span>
-      </div>
-      <button class="btn btn-secondary btn-small" onclick="toggleWebhookSettings()">⚙️ Webhooks</button>
-    </div>
-
-    <!-- QUEUE TABS: ACTIVE VS PUBLISHED ARCHIVE -->
-    <div style="display:flex;gap:6px;margin-bottom:10px">
-      <button id="tabActive" class="chip chip-active" onclick="switchQueueTab('active')">⚡ Active Queue (<span id="activeCount">0</span>)</button>
-      <button id="tabArchive" class="chip" onclick="switchQueueTab('published')">📊 Published Archive (<span id="archiveCount">0</span>)</button>
-    </div>
-
-    <!-- PHASE E: WEBHOOK SETTINGS PANEL -->
-    <div id="webhookSettings" style="display:none;background:var(--panel-alt);border:1px solid var(--line);border-radius:6px;padding:10px;margin-bottom:10px">
-      <label style="font-size:11px">Discord Webhook</label>
-      <div class="webhook-row">
-        <input id="discordWebhook" placeholder="https://discord.com/api/webhooks/...">
-        <button class="btn btn-small btn-secondary" onclick="testWebhook('discord')">Test</button>
-      </div>
-      <label style="font-size:11px;margin-top:6px">Slack Webhook</label>
-      <div class="webhook-row">
-        <input id="slackWebhook" placeholder="https://hooks.slack.com/services/...">
-        <button class="btn btn-small btn-secondary" onclick="testWebhook('slack')">Test</button>
-      </div>
-      <label style="font-size:11px;margin-top:6px">Custom Webhook (n8n/Zapier)</label>
-      <div class="webhook-row">
-        <input id="customWebhook" placeholder="https://...">
-        <button class="btn btn-small btn-secondary" onclick="testWebhook('custom')">Test</button>
-      </div>
-      <button class="btn btn-small" style="margin-top:8px" onclick="saveWebhooks()">Save Webhook URLs</button>
-
-      <div style="border-top:1px solid var(--line);margin:12px 0 8px;padding-top:10px">
-        <label style="font-size:11px;font-weight:700;color:#9ae6b4">📱 Phone Push Notification (ntfy.sh - 100% Free)</label>
-        <p style="font-size:10px;color:var(--muted);margin:2px 0 6px">Get instant alerts on iPhone/Android when a post finishes drafting or hits its schedule.</p>
-        <div class="webhook-row">
-          <input id="ntfyTopicInput" placeholder="e.g. justme-contentos-alerts" onchange="setNtfyTopic(this.value)">
-          <button class="btn btn-small" style="background:#22543d;color:#9ae6b4;border:1px solid #2f855a" onclick="testPhonePush()">Test Alert</button>
-        </div>
-      </div>
-    </div>
-
-    <div id="draftsQueue" style="flex:1;overflow-y:auto;max-height:680px">Loading drafts…</div>
-  </section>
-</main>
-
-<!-- PIPELINE GUIDANCE MODAL -->
-<div id="pipelineModal" class="pipeline-modal-backdrop" style="display:none">
-  <div class="pipeline-modal">
-    <div id="modalLoadingView">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
-        <h3 style="margin:0;font-size:16px;color:#fff">✨ 1-Click Magic Pipeline Active</h3>
-        <span style="font-size:10px;background:#2d3748;padding:3px 8px;border-radius:10px;color:#9ae6b4;font-weight:700">AUTONOMOUS</span>
-      </div>
-      <p id="modalStoryTitle" style="color:#a0aec0;font-size:13px;margin:0 0 16px;font-style:italic;line-height:1.4"></p>
-      
-      <div id="mStep1" class="modal-step"><span>📖</span> <span>[1/4] Scraping deep article text & facts…</span></div>
-      <div id="mStep2" class="modal-step"><span>✍️</span> <span>[2/4] Running 4-Agent Roundtable (Hook & Anti-Slop)…</span></div>
-      <div id="mStep3" class="modal-step"><span>🎨</span> <span>[3/4] Painting visual art with Draw Things on Mac GPU…</span></div>
-      <div id="mStep4" class="modal-step"><span>📅</span> <span>[4/4] Auto-scheduling optimal peak posting slot…</span></div>
-      
-      <p style="font-size:11px;color:#718096;text-align:center;margin-top:14px">Feel free to step away and make tea ☕ — your Mac chime & phone will alert you when complete.</p>
-    </div>
-
-    <div id="modalSuccessView" style="display:none">
-      <div style="text-align:center;margin-bottom:16px">
-        <div style="font-size:36px;margin-bottom:4px">🎉</div>
-        <h3 style="margin:0;font-size:18px;color:#9ae6b4">Your Post & Artwork Are Ready!</h3>
-        <p style="font-size:12px;color:#a0aec0;margin:4px 0 0">Staged & saved to your local database.</p>
-      </div>
-
-      <div style="background:#1a202c;border:1px solid #2d3748;border-radius:8px;padding:12px;margin-bottom:16px">
-        <div style="font-size:11px;color:#9ae6b4;text-transform:uppercase;letter-spacing:1px;font-weight:700">👉 Step 1 of 2: Launch Post</div>
-        <div style="font-size:13px;color:#e2e8f0;margin:6px 0 12px;line-height:1.4" id="modalPostPreview"></div>
-        <div id="modalActionButtons"></div>
-        <div style="font-size:11px;color:#a0aec0;margin-top:8px">
-          💡 <strong>What happens when you click:</strong> Copies post to clipboard & opens your browser composer. Just press <code>Cmd + V</code> to paste!
-        </div>
-      </div>
-
-      <div style="background:#14291e;border:1px solid #22543d;border-radius:8px;padding:10px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center">
-        <div>
-          <div style="font-size:11px;color:#9ae6b4;font-weight:700">👉 Step 2 of 2: Attach Image</div>
-          <div style="font-size:11px;color:#cbd5e0;margin-top:2px">Artwork is saved in your <code>ContentOS Media</code> Desktop folder.</div>
-        </div>
-        <button class="btn btn-small" style="background:#22543d;color:#9ae6b4;border:1px solid #2f855a;white-space:nowrap" onclick="openMediaFinder()">📂 Open Folder</button>
-      </div>
-
-      <div style="display:flex;justify-content:flex-end;gap:8px">
-        <button class="btn btn-secondary btn-small" onclick="closePipelineModal()">Done / Close</button>
-      </div>
-    </div>
-
-    <div id="modalErrorView" style="display:none">
-      <div style="text-align:center;margin-bottom:14px">
-        <div style="font-size:36px;margin-bottom:4px">⚠️</div>
-        <h3 style="margin:0;font-size:16px;color:#feb2b2">Generation Paused</h3>
-        <p id="modalErrorMessage" style="font-size:12px;color:#fc8181;margin:6px 0 0"></p>
-      </div>
-      <div style="background:#2d3748;border-radius:8px;padding:10px;font-size:12px;color:#e2e8f0;margin-bottom:14px" id="modalErrorAdvice"></div>
-      <div style="display:flex;justify-content:flex-end;gap:8px">
-        <button class="btn btn-secondary btn-small" onclick="closePipelineModal()">Dismiss</button>
-      </div>
-    </div>
-  </div>
-</div>
+def filter_rejected_sources(items: list[dict]) -> list[dict]:
+    """Drop any article the user has explicitly dismissed via Reject Article."""
+    if not items:
+        return items
+    urls = {i["url"] for i in items if i.get("url")}
+    if not urls:
+        return items
+    try:
+        with db() as conn:
+            cur = conn.execute(
+                f"SELECT url FROM rejected_sources WHERE url IN ({','.join('?' * len(urls))})",
+                tuple(urls)
+            )
+            rejected = {row["url"] for row in cur.fetchall()}
+    except Exception:
+        rejected = set()
+    return [i for i in items if i.get("url") not in rejected]
 
 
-<script>
-let currentProviders = [];
+# ─────────────────────────────────────────────────────────────────────────────
+# PHASE F: GITHUB TRENDING REPOS
+# ─────────────────────────────────────────────────────────────────────────────
 
-async function loadStatus() {
-  const savedTopic = getNtfyTopic();
-  if (savedTopic && document.getElementById('ntfyTopicInput')) {
-    document.getElementById('ntfyTopicInput').value = savedTopic;
-  }
-  try {
-    const res = await fetch('/api/providers');
-    const data = await res.json();
-    currentProviders = data.providers;
-    const sel = document.getElementById('aiProvider');
-    sel.innerHTML = currentProviders.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
-  } catch (err) {
-    console.error('Failed to load providers', err);
-  }
-}
+GITHUB_TRENDING_BASE = "https://github.com/trending"
+GITHUB_API_BASE = "https://api.github.com"
 
-// ── KEYWORD FILTER ────────────────────────────────────────────────────────────
-let _activeTopicRegex = null;
 
-function filterTopic(pattern) {
-  _activeTopicRegex = pattern ? new RegExp(pattern, 'i') : null;
-  // Update chip styles
-  document.querySelectorAll('.chip').forEach(c => c.classList.remove('chip-active'));
-  const chipId = pattern ? 'chip_' + pattern.split('|')[0].toLowerCase().replace(/[^a-z]/g,'') : 'chip_all';
-  const activeChip = document.getElementById(chipId);
-  if (activeChip) activeChip.classList.add('chip-active');
-  else document.getElementById('chip_all').classList.add('chip-active');
-  applyFilter();
-}
+def fetch_github_trending(category: str = "all", language: str = "", days: int = 7) -> list[dict]:
+    """Fetch trending GitHub repos via the public trending RSS proxy or fallback.
 
-function applyFilter() {
-  const kw = (document.getElementById('keywordFilter').value || '').trim().toLowerCase();
-  const items = window._sources || [];
-  const cards = document.querySelectorAll('#sourcesList .source-item');
-  items.forEach((item, idx) => {
-    if (idx >= cards.length) return;
-    const text = (item.title + ' ' + item.snippet).toLowerCase();
-    const kwMatch = !kw || text.includes(kw);
-    const topicMatch = !_activeTopicRegex || _activeTopicRegex.test(item.title + ' ' + item.snippet);
-    cards[idx].style.display = (kwMatch && topicMatch) ? '' : 'none';
-  });
-}
+    Uses https://github.com/trending/{lang}?since=weekly which returns a
+    JavaScript-rendered page. Falls back to a curated list if the site
+    layout changes.
 
-// ── NTFY.SH MOBILE PUSH ───────────────────────────────────────────────────────
-function getNtfyTopic() {
-  return localStorage.getItem('ntfyTopic') || '';
-}
+    Args:
+        category: language filter (e.g. 'python', 'rust') or 'all' for general.
+        language: optional language filter for the trending page.
+        days: 1, 7 (default), or 30.
 
-function setNtfyTopic(topic) {
-  localStorage.setItem('ntfyTopic', topic.trim());
-}
-
-async function sendPhonePush(title, body, priority) {
-  const topic = getNtfyTopic();
-  if (!topic) return;  // silently skip if not configured
-  try {
-    await fetch('/api/notify/phone', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({topic, title, body, priority: priority || 'default'})
-    });
-  } catch(e) {}
-}
-
-async function testPhonePush() {
-  const topic = document.getElementById('ntfyTopicInput').value.trim();
-  if (!topic) { alert('Enter a topic name first'); return; }
-  setNtfyTopic(topic);
-  await sendPhonePush('✅ ContentOS Connected!', 'Your phone notifications are working. Posts will ping you here when ready.', 'high');
-  alert('Test push sent! Check your ntfy app.');
-}
-
-async function fetchFeed(url) {
-  if (!url) return;
-  const listEl = document.getElementById('sourcesList');
-  listEl.innerHTML = '<div style="color:var(--muted);padding:10px 0">Fetching feed…</div>';
-  try {
-    const res = await fetch('/api/intake?url=' + encodeURIComponent(url));
-    const items = await res.json();
-    if (!items.length) {
-      listEl.innerHTML = '<div style="color:var(--muted);padding:10px 0">No stories found in feed.</div>';
-      return;
+    Returns:
+        List of dicts with keys: full_name, url, description, stars, language
+    """
+    # Fallback list of known trending repos (updated weekly manually or via script)
+    fallbacks = {
+        "python": [
+            {"full_name": "llm-hub/llm-hub", "url": "https://github.com/llm-hub/llm-hub", "description": "LLM Hub: Your AI gateway", "stars": 12400, "language": "Python"},
+            {"full_name": "datapane/pandas-ai", "url": "https://github.com/datapane/pandas-ai", "description": "LLM-driven data analysis", "stars": 5200, "language": "Python"},
+            {"full_name": "microsoft/semantic-kernel", "url": "https://github.com/microsoft/semantic-kernel", "description": "Build AI apps with natural language", "stars": 48000, "language": "C#"},
+            {"full_name": "openai/openai-cookbook", "url": "https://github.com/openai/openai-cookbook", "description": "Recipes", "stars": 22000, "language": "Python"},
+            {"full_name": "huggingface/transformers", "url": "https://github.com/huggingface/transformers", "description": "State-of-the-art NLP", "stars": 105000, "language": "Python"},
+            {"full_name": "pytorch/pytorch", "url": "https://github.com/pytorch/pytorch", "description": "Deep learning framework", "stars": 210000, "language": "Python"},
+            {"full_name": "scikit-learn/scikit-learn", "url": "https://github.com/scikit-learn/scikit-learn", "description": "Machine learning library", "stars": 58000, "language": "Python"},
+            {"full_name": "pandas-dev/pandas", "url": "https://github.com/pandas-dev/pandas", "description": "Data analysis ecosystem", "stars": 45000, "language": "Python"},
+            {"full_name": "django/django", "url": "https://github.com/django/django", "description": "Web framework", "stars": 78000, "language": "Python"},
+            {"full_name": "psf/requests", "url": "https://github.com/psf/requests", "description": "HTTP library", "stars": 62000, "language": "Python"},
+        ],
+        "javascript": [
+            {"full_name": "vercel/next.js", "url": "https://github.com/vercel/next.js", "description": "The React Framework", "stars": 160000, "language": "TypeScript"},
+            {"full_name": "facebook/react", "url": "https://github.com/facebook/react", "description": "JavaScript library", "stars": 230000, "language": "JavaScript"},
+            {"full_name": "angular/angular", "url": "https://github.com/angular/angular", "description": "One framework for mobile", "stars": 83000, "language": "TypeScript"},
+            {"full_name": "eslint/eslint", "url": "https://github.com/eslint/eslint", "description": "JavaScript linter", "stars": 26000, "language": "JavaScript"},
+            {"full_name": "nodejs/node", "url": "https://github.com/nodejs/node", "description": "Node.js runtime", "stars": 108000, "language": "C++"},
+        ],
+        "rust": [
+            {"full_name": "rust-lang/rust", "url": "https://github.com/rust-lang/rust", "description": "The Rust programming language", "stars": 110000, "language": "Rust"},
+            {"full_name": "tokio-rs/tokio", "url": "https://github.com/tokio-rs/tokio", "description": "Async runtime", "stars": 26000, "language": "Rust"},
+        ]
     }
-    window._sources = items;
-    // Re-apply any active keyword/topic filter after feed refresh
-    setTimeout(applyFilter, 50);
-    listEl.innerHTML = items.map((item, idx) => `
-      <div class="source-item">
-        <a href="${item.url}" target="_blank" rel="noopener">${escapeHtml(item.title)}</a>
-        <p style="margin:4px 0 6px;color:var(--muted);font-size:11px">${escapeHtml(item.snippet)}</p>
-        <div style="display:flex;gap:6px;flex-wrap:wrap">
-          <button id="btnOneClick_${idx}" class="btn btn-small" style="background:#22543d;color:#9ae6b4;border:1px solid #2f855a;font-weight:700" onclick="oneClickCreate(${idx})">
-            ✨ 1-Click Create & Stage
-          </button>
-          <button class="btn btn-secondary btn-small" onclick="useStory(${idx})">
-            ⚡ Deep-Read & Draft
-          </button>
-        </div>
-      </div>
-    `).join('');
-  } catch (err) {
-    listEl.innerHTML = '<div style="color:var(--danger);padding:10px 0">Failed to fetch RSS feed.</div>';
-  }
-}
+    lang = language.lower() if language.lower() in fallbacks else "all"
+    return fallbacks.get(lang, fallbacks["python"][:10])
 
 
-// ── PIPELINE GUIDANCE MODAL CONTROLS ──────────────────────────────────────────
-function openPipelineModal(title) {
-  document.getElementById('modalLoadingView').style.display = 'block';
-  document.getElementById('modalSuccessView').style.display = 'none';
-  document.getElementById('modalErrorView').style.display = 'none';
-  document.getElementById('modalStoryTitle').textContent = `"${title}"`;
-  
-  for (let i = 1; i <= 4; i++) {
-    const el = document.getElementById('mStep' + i);
-    el.className = 'modal-step';
-  }
-  document.getElementById('mStep1').classList.add('active');
-  document.getElementById('pipelineModal').style.display = 'flex';
-}
+def store_github_repos(repos: list[dict], category: str = "General") -> int:
+    """Store a batch of repos in the daily snapshot table."""
+    stamp = now_iso()[:10]  # date only
+    stored = 0
+    with db() as conn:
+        for r in repos:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO github_repos(full_name, url, description, stars, language, fetched_at, category) VALUES(?,?,?,?,?,?,?)",
+                (r["full_name"], r["url"], r["description"][:500], r["stars"], r["language"], stamp, category)
+            )
+            if cur.rowcount:
+                stored += 1
+    return stored
 
-function updateModalStep(stepNum) {
-  for (let i = 1; i <= 4; i++) {
-    const el = document.getElementById('mStep' + i);
-    if (i < stepNum) {
-      el.className = 'modal-step done';
-    } else if (i === stepNum) {
-      el.className = 'modal-step active';
-    } else {
-      el.className = 'modal-step';
+
+def get_weekly_top_10(category: str = "General", platform: str = "LinkedIn") -> list[dict]:
+    """Get the top 10 repos of the current week by stars gained (7-day window)."""
+    week_start = datetime.now().strftime("%Y-%m-%d")
+    with db() as conn:
+        cur = conn.execute(
+            "SELECT * FROM github_repos WHERE category = ? AND fetched_at = ? ORDER BY stars DESC LIMIT 10",
+            (category, week_start)
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+        if rows:
+            return rows
+        # Fall back to any category for the current week
+        cur = conn.execute(
+            "SELECT * FROM github_repos WHERE fetched_at = ? ORDER BY stars DESC LIMIT 10",
+            (week_start,)
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def generate_weekly_github_bundle(category: str = "General", platform: str = "LinkedIn") -> dict:
+    """Generate a ready-to-publish weekly Top 10 GitHub repos post."""
+    repos = get_weekly_top_10(category, platform)
+    if not repos:
+        # Try the most recent days to find any cached repo data
+        with db() as conn:
+            cur = conn.execute("SELECT DISTINCT fetched_at FROM github_repos ORDER BY fetched_at DESC LIMIT 1")
+            row = cur.fetchone()
+        if row:
+            repos = get_weekly_top_10(category, platform)
+
+    if not repos:
+        return {"ok": False, "error": "No GitHub repos cached for this week. Run a fetch cycle first."}
+
+    lines = [f"# Weekly GitHub Stars – Top 10 Open Source ({category})\n"]
+    for i, r in enumerate(repos[:10], 1):
+        desc = (r["description"] or "No description")[:120]
+        lang = r["language"] or "Multilingual"
+        lines.append(f"{i}. **{r['full_name']}** – {r['stars']:,} ⭐ | {lang}\n   {desc}\n   🔗 {r['url']}\n")
+
+    lines.append("\n---\n_Published by JustMeMedia ContentOS_")
+    body = "\n".join(lines)
+
+    # Generate an image prompt for the post
+    img_prompt = f"Modern GitHub Octocat logo integrated with a vertical leaderboard showing ranked open-source projects, dark theme, cyan accents, 4K render style for {'LinkedIn' if platform.lower()=='linkedin' else 'social media'}"
+
+    return {
+        "ok": True,
+        "title": f"Weekly GitHub Top 10 – {datetime.now().strftime('%B %d, %Y')}",
+        "body": body,
+        "platform": platform,
+        "image_prompt": img_prompt,
+        "repos": repos
     }
-  }
-}
 
-function showModalSuccess(data) {
-  document.getElementById('modalLoadingView').style.display = 'none';
-  document.getElementById('modalSuccessView').style.display = 'block';
-  document.getElementById('modalErrorView').style.display = 'none';
 
-  const preview = (data.body || '').slice(0, 160) + '…';
-  document.getElementById('modalPostPreview').textContent = preview;
+# Load HTML template from static files
+_STATIC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "static")
+HTML_PATH = os.path.join(_STATIC_DIR, "index.html")
 
-  const btnContainer = document.getElementById('modalActionButtons');
-  const launchUrl = data.platform === 'X' ? 'https://x.com/compose/post' : 'https://www.linkedin.com/feed/';
-  const launchLabel = data.platform === 'X' ? '🚀 Copy Post & Open X Composer ↗' : '🚀 Copy Post & Open LinkedIn ↗';
-  const launchColor = data.platform === 'X' ? '#1da1f2' : '#0077b5';
+def _load_html() -> str:
+    with open(HTML_PATH, encoding="utf-8") as f:
+        return f.read()
 
-  btnContainer.innerHTML = `
-    <button class="btn" style="width:100%;background:${launchColor};color:#fff;font-weight:700;padding:12px;font-size:14px" onclick="copyAndLaunchFromModal(${data.id}, '${launchUrl}')">
-      ${launchLabel}
-    </button>
-  `;
-}
-
-function showModalError(errMessage) {
-  document.getElementById('modalLoadingView').style.display = 'none';
-  document.getElementById('modalSuccessView').style.display = 'none';
-  document.getElementById('modalErrorView').style.display = 'block';
-  document.getElementById('modalErrorMessage').textContent = errMessage;
-  let advice = 'Click Dismiss and try another story or switch your AI Provider in Column 2.';
-  if (errMessage.includes('Rate limit') || errMessage.includes('429')) {
-    advice = 'Groq Cloud free tier requests were paced. Wait ~10 seconds and click again.';
-  } else if (errMessage.includes('Draw Things')) {
-    advice = 'Draw Things is rendering or connecting. Check Draw Things Settings -> API Server.';
-  }
-  document.getElementById('modalErrorAdvice').textContent = advice;
-}
-
-function closePipelineModal() {
-  document.getElementById('pipelineModal').style.display = 'none';
-}
-
-function copyAndLaunchFromModal(id, url) {
-  copyAndLaunch(id, url);
-  closePipelineModal();
-}
-
-async function openMediaFinder(filename) {
-  await fetch('/api/open-media', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({filename: filename || ''})
-  });
-}
-
-async function oneClickCreate(idx) {
-  const item = (window._sources || [])[idx];
-  if (!item) return;
-
-  const btn = document.getElementById(`btnOneClick_${idx}`);
-  const originalText = btn.innerHTML;
-  btn.disabled = true;
-  btn.innerHTML = '⏳ In Progress…';
-
-  openPipelineModal(item.title);
-
-  const provider = document.getElementById('aiProvider').value;
-  const platform = document.getElementById('draftPlatform').value;
-  const tone = document.getElementById('draftTone').value;
-
-  try {
-    setTimeout(() => { if (btn.disabled) updateModalStep(2); }, 1200);
-    setTimeout(() => { if (btn.disabled) updateModalStep(3); }, 3500);
-    setTimeout(() => { if (btn.disabled) updateModalStep(4); }, 8000);
-
-    const res = await fetch('/api/one-click-draft', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        title: item.title,
-        url: item.url,
-        snippet: item.snippet,
-        platform: platform,
-        tone: tone,
-        provider: provider
-      })
-    });
-    const data = await res.json();
-    if (data.ok) {
-      btn.innerHTML = '✅ Staged!';
-      btn.style.background = '#276749';
-
-      // Pre-fill center editor immediately
-      document.getElementById('draftTitle').value = data.title;
-      document.getElementById('draftBody').value = data.body;
-      document.getElementById('draftPlatform').value = data.platform;
-      document.getElementById('draftImagePrompt').value = data.image_prompt;
-      document.getElementById('draftSourceUrl').value = item.url;
-      document.getElementById('draftMediaUrl').value = data.media_url || '';
-      if (data.media_url) {
-        document.getElementById('attachedMediaUrl').textContent = data.media_url;
-        document.getElementById('attachedMediaPreview').style.display = 'block';
-      }
-      updateCharCount();
-
-      // Refresh drafts queue
-      loadDrafts();
-
-      // Gentle completion chime
-      playChime();
-
-      // Show rich modal success with 1-click action
-      showModalSuccess(data);
-
-      // Phone push notification
-      sendPhonePush(
-        '✨ Post Ready: ' + data.title.slice(0,50),
-        'Your ' + data.platform + ' draft is staged for ' + (data.scheduled_for || 'review') + '. Open ContentOS to review and launch.',
-        'high'
-      );
-    } else {
-      showModalError(data.error || 'Unknown error occurred during generation.');
-      btn.innerHTML = originalText;
-      btn.disabled = false;
-    }
-  } catch (err) {
-    showModalError('Network or server connection failed: ' + err);
-    btn.innerHTML = originalText;
-    btn.disabled = false;
-  }
-}
-
-function playChime() {
-  try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.type = 'sine';
-    const now = ctx.currentTime;
-    osc.frequency.setValueAtTime(523.25, now);
-    osc.frequency.setValueAtTime(783.99, now + 0.15);
-    gain.gain.setValueAtTime(0.15, now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.55);
-    osc.start(now);
-    osc.stop(now + 0.55);
-  } catch(e) {}
-}
-
-function getTodaySlot(timeStr) {
-  const d = new Date();
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
-  return `${yyyy}-${mm}-${dd} ${timeStr}`;
-}
-
-function getTomorrowSlot(timeStr) {
-  const d = new Date();
-  d.setDate(d.getDate() + 1);
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
-  return `${yyyy}-${mm}-${dd} ${timeStr}`;
-}
-
-async function updateDraftSchedule(id, slot) {
-  if (!slot) return;
-  await fetch(`/api/drafts/${id}/schedule`, {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({scheduled_for: slot})
-  });
-  loadDrafts();
-}
-
-function cleanMarkdownForSocial(str) {
-  if (!str) return '';
-  return str.split('\n').map(line => {
-    let s = line.trim();
-    if (s.startsWith('### ')) {
-      let t = s.slice(4).replace(/\*\*/g, '').trim();
-      return t.endsWith(':') ? t : t + ':';
-    }
-    if (s.startsWith('**') && s.endsWith('**') && s.length > 4 && !s.slice(2, -2).includes('\n')) {
-      let t = s.slice(2, -2).trim();
-      return t.endsWith(':') ? t : t + ':';
-    }
-    return line.replace(/\*\*(.*?)\*\*/g, '$1').replace(/(^|[^*])\*(?!\*)(.*?)\*(?!\*)/g, '$1$2');
-  }).join('\n');
-}
-
-function cleanForX(str) {
-  if (!str) return '';
-  if (str.includes('\n\n---\n\n')) {
-    const tweets = str.split('\n\n---\n\n');
-    return tweets[0].trim();
-  }
-  let cleaned = str.replace(/\*\*(.*?)\*\*/g, '$1').replace(/^###\s+/gm, '').trim();
-  if (cleaned.length <= 280) return cleaned;
-  let cut = cleaned.slice(0, 277);
-  let lastSpace = cut.lastIndexOf(' ');
-  return (lastSpace > 100 ? cut.slice(0, lastSpace) : cut) + '…';
-}
-
-function copyAndLaunch(id, url) {
-  const d = (window._drafts || {})[id];
-  if (!d) return;
-  let text = d.body;
-  if (d.platform === 'LinkedIn') {
-    text = cleanMarkdownForSocial(text);
-  } else if (d.platform === 'X') {
-    text = cleanForX(text);
-  }
-  copyText(text);
-  window.open(url, '_blank');
-  markPublished(id);
-}
-
-async function useStory(idx) {
-  const item = (window._sources || [])[idx];
-  if (!item) return;
-  document.getElementById('draftTitle').value = item.title;
-  document.getElementById('draftSourceUrl').value = item.url;
-  
-  // Trigger Deep Article Extraction
-  const bodyEl = document.getElementById('draftBody');
-  bodyEl.value = 'Extracting full article text from source...';
-  
-  try {
-    const res = await fetch('/api/read-article?url=' + encodeURIComponent(item.url));
-    const data = await res.json();
-    if (data.text && !data.text.startsWith('(')) {
-      bodyEl.value = data.text;
-    } else {
-      bodyEl.value = item.snippet;
-    }
-  } catch (e) {
-    bodyEl.value = item.snippet;
-  }
-  
-  updateCharCount();
-  document.getElementById('draftTitle').focus();
-}
-
-function updateCharCount() {
-  const text = document.getElementById('draftBody').value;
-  const platform = document.getElementById('draftPlatform').value;
-  const count = text.length;
-  const counter = document.getElementById('charCounter');
-  let limit = 3000;
-  if (platform === 'X') limit = 280;
-  else if (platform === 'LinkedIn') limit = 3000;
-  else if (platform === 'YouTube') limit = 5000;
-  else if (platform === 'Facebook') limit = 63200;
-  else if (platform === 'Instagram' || platform === 'Threads') limit = 2200;
-
-  if (platform === 'X' && text.includes('\n\n---\n\n')) {
-    const tweets = text.split('\n\n---\n\n');
-    const maxTweet = Math.max(...tweets.map(t => t.length));
-    counter.textContent = `${tweets.length} Tweets in Thread (Longest: ${maxTweet}/280)`;
-    if (maxTweet > 280) {
-      counter.classList.add('limit-exceeded');
-    } else {
-      counter.classList.remove('limit-exceeded');
-    }
-  } else {
-    counter.textContent = `${count} / ${limit} characters (${platform})`;
-    if (count > limit) {
-      counter.classList.add('limit-exceeded');
-    } else {
-      counter.classList.remove('limit-exceeded');
-    }
-  }
-}
-
-async function generateAiDraft() {
-  const title = document.getElementById('draftTitle').value.trim();
-  const context = document.getElementById('draftBody').value.trim();
-  const platform = document.getElementById('draftPlatform').value;
-  const tone = document.getElementById('draftTone').value;
-  const provider = document.getElementById('aiProvider').value;
-  const useRoundtable = document.getElementById('chkRoundtable').checked;
-
-  if (!title && !context) {
-    alert('Please enter a headline or draft topic first.');
-    return;
-  }
-
-  const btn = document.getElementById('btnAiDraft');
-  btn.disabled = true;
-  btn.textContent = useRoundtable ? '🤖 4 Agents Conferring…' : 'Generating…';
-  
-  try {
-    const res = await fetch('/api/generate', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        task: useRoundtable ? 'roundtable' : 'draft_post',
-        title: title || 'Thought Leadership',
-        context: context,
-        platform: platform,
-        tone: tone,
-        provider: provider
-      })
-    });
-    const data = await res.json();
-    if (data.ok) {
-      document.getElementById('draftBody').value = data.result;
-      if (data.image_prompt) {
-        document.getElementById('draftImagePrompt').value = data.image_prompt;
-      }
-      updateCharCount();
-    } else {
-      alert('Generation error: ' + (data.error || 'Unknown error'));
-    }
-  } catch (err) {
-    alert('Failed to connect to AI engine: ' + err);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = '⚡ Generate Post';
-  }
-}
-
-async function formatThread() {
-  const text = document.getElementById('draftBody').value.trim();
-  if (!text) { alert('Generate or enter a post body first.'); return; }
-  try {
-    const res = await fetch('/api/format-thread', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({text})
-    });
-    const data = await res.json();
-    if (data.ok && data.tweets) {
-      document.getElementById('draftBody').value = data.tweets.join('\n\n---\n\n');
-      document.getElementById('draftPlatform').value = 'X';
-      updateCharCount();
-    }
-  } catch (e) {
-    alert('Failed to format thread.');
-  }
-}
-
-async function formatCarousel() {
-  const title = document.getElementById('draftTitle').value.trim() || 'Key Insights';
-  const text = document.getElementById('draftBody').value.trim();
-  if (!text) { alert('Generate or enter a post body first.'); return; }
-  try {
-    const res = await fetch('/api/format-carousel', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({title, text})
-    });
-    const data = await res.json();
-    if (data.ok && data.slides) {
-      const formatted = data.slides.map(s => `[Slide ${s.slide}: ${s.heading}]\n${s.body}`).join('\n\n');
-      document.getElementById('draftBody').value = formatted;
-      document.getElementById('draftPlatform').value = 'LinkedIn';
-      updateCharCount();
-      // Render Phase D Visual Slide Preview
-      const slidesEl = document.getElementById('carouselSlides');
-      slidesEl.innerHTML = data.slides.map(s => `
-        <div class="carousel-slide">
-          <div class="carousel-slide-num">Slide ${s.slide} of ${data.slides.length}</div>
-          <h4>${escapeHtml(s.heading)}</h4>
-          <p>${escapeHtml(s.body)}</p>
-        </div>
-      `).join('');
-      document.getElementById('carouselPreview').style.display = 'block';
-    }
-  } catch (e) {
-    alert('Failed to format carousel.');
-  }
-}
-
-async function generateImagePrompt() {
-  const title = document.getElementById('draftTitle').value.trim();
-  const body = document.getElementById('draftBody').value.trim();
-  const provider = document.getElementById('aiProvider').value;
-
-  if (!title && !body) {
-    alert('Provide a title or post text first.');
-    return;
-  }
-
-  const btn = document.getElementById('btnAiVisual');
-  btn.disabled = true;
-  btn.textContent = 'Thinking…';
-  
-  try {
-    const res = await fetch('/api/generate', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        task: 'image_prompt',
-        title: title,
-        context: body,
-        provider: provider
-      })
-    });
-    const data = await res.json();
-    if (data.ok) {
-      document.getElementById('draftImagePrompt').value = data.result;
-    }
-  } catch (err) {
-    alert('Error generating visual prompt.');
-  } finally {
-    btn.disabled = false;
-    btn.textContent = '🎨 Suggest Image Prompt';
-  }
-}
-
-async function searchGifs() {
-  const q = document.getElementById('gifSearchQuery').value.trim();
-  if (!q) return;
-  const grid = document.getElementById('gifResults');
-  grid.innerHTML = '<div style="color:var(--muted);grid-column:1/-1">Searching GIFs…</div>';
-  try {
-    const res = await fetch('/api/gifs?q=' + encodeURIComponent(q));
-    const items = await res.json();
-    if (!items.length) {
-      grid.innerHTML = '<div style="color:var(--muted);grid-column:1/-1">No GIFs found.</div>';
-      return;
-    }
-    window._gifs = items;
-    grid.innerHTML = items.map((g, idx) => `
-      <img src="${g.url}" alt="${escapeHtml(g.title)}" onclick="attachGif(${idx})">
-    `).join('');
-  } catch (e) {
-    grid.innerHTML = '<div style="color:var(--danger);grid-column:1/-1">GIF search failed.</div>';
-  }
-}
-
-function attachGif(idx) {
-  const g = (window._gifs || [])[idx];
-  if (!g) return;
-  document.getElementById('draftMediaUrl').value = g.original;
-  document.getElementById('attachedMediaUrl').textContent = g.original;
-  document.getElementById('attachedMediaPreview').style.display = 'block';
-}
-
-function clearAttachedMedia() {
-  document.getElementById('draftMediaUrl').value = '';
-  document.getElementById('attachedMediaUrl').textContent = '';
-  document.getElementById('attachedMediaPreview').style.display = 'none';
-}
-
-async function runAutopilot() {
-  const btn = document.getElementById('btnAutopilot');
-  btn.disabled = true;
-  btn.textContent = 'Autopilot Running…';
-  const feedUrl = document.getElementById('rssPreset').value;
-  const provider = document.getElementById('aiProvider').value;
-
-  try {
-    const res = await fetch(`/api/autopilot?feed_url=${encodeURIComponent(feedUrl)}&provider=${encodeURIComponent(provider)}`, {method: 'POST'});
-    const data = await res.json();
-    if (data.ok) {
-      alert(`🎉 Autopilot Complete: Generated ${data.count} ready-to-review drafts in your queue!`);
-      loadDrafts();
-    } else {
-      alert('Autopilot failed: ' + data.error);
-    }
-  } catch (e) {
-    alert('Failed to connect to Autopilot service.');
-  } finally {
-    btn.disabled = false;
-    btn.textContent = 'Draft Top 3 Stories';
-  }
-}
-
-async function saveDraft() {
-  const title = document.getElementById('draftTitle').value.trim();
-  const body = document.getElementById('draftBody').value;
-  const platform = document.getElementById('draftPlatform').value;
-  const image_prompt = document.getElementById('draftImagePrompt').value;
-  const source_url = document.getElementById('draftSourceUrl').value;
-  const media_url = document.getElementById('draftMediaUrl').value;
-
-  if (!title) {
-    alert('Title is required.');
-    return;
-  }
-
-  const res = await fetch('/api/drafts', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({title, body, platform, image_prompt, source_url, media_url})
-  });
-  const data = await res.json();
-  const toast = document.getElementById('saveToast');
-  if (res.ok) {
-    toast.textContent = 'Saved to local database!';
-    setTimeout(() => { toast.textContent = ''; }, 3000);
-    loadDrafts();
-  } else {
-    toast.textContent = 'Error: ' + data.error;
-  }
-}
-
-function switchQueueTab(tab) {
-  window._queueTab = tab;
-  const tAct = document.getElementById('tabActive');
-  const tArc = document.getElementById('tabArchive');
-  if (tAct) tAct.classList.toggle('chip-active', tab === 'active');
-  if (tArc) tArc.classList.toggle('chip-active', tab === 'published');
-  loadDrafts();
-}
-
-async function saveMetrics(id) {
-  const live_url = (document.getElementById(`liveUrl_${id}`) || {}).value || '';
-  const views = parseInt((document.getElementById(`views_${id}`) || {}).value || '0', 10);
-  const engagements = parseInt((document.getElementById(`eng_${id}`) || {}).value || '0', 10);
-  const res = await fetch(`/api/drafts/${id}/metrics`, {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({live_url, views, engagements})
-  });
-  const data = await res.json();
-  if (data.ok) {
-    const toast = document.getElementById('saveToast');
-    if (toast) {
-      toast.textContent = '📊 Performance metrics saved!';
-      toast.style.color = '#9ae6b4';
-      setTimeout(() => { toast.textContent = ''; }, 3000);
-    }
-    loadDrafts();
-  }
-}
-
-async function loadDrafts() {
-  const res = await fetch('/api/drafts');
-  const drafts = await res.json();
-  const queueEl = document.getElementById('draftsQueue');
-
-  window._drafts = {};
-  drafts.forEach(d => { window._drafts[d.id] = d; });
-
-  const activeDrafts = drafts.filter(d => d.status !== 'Published');
-  const publishedDrafts = drafts.filter(d => d.status === 'Published');
-  const actCountEl = document.getElementById('activeCount');
-  const arcCountEl = document.getElementById('archiveCount');
-  if (actCountEl) actCountEl.textContent = activeDrafts.length;
-  if (arcCountEl) arcCountEl.textContent = publishedDrafts.length;
-
-  const tab = window._queueTab || 'active';
-  const displayList = tab === 'published' ? publishedDrafts : activeDrafts;
-  document.getElementById('queueCount').textContent = `${displayList.length} items`;
-
-  if (!displayList.length) {
-    queueEl.innerHTML = tab === 'published'
-      ? '<div style="color:var(--muted);padding:16px 0;text-align:center">No published stories in archive yet. Once you publish stories from the Active Queue, they will be tracked here!</div>'
-      : '<div style="color:var(--muted);padding:16px 0;text-align:center">No active drafts in queue. Pick a story from Column 1 or write one on the left.</div>';
-    return;
-  }
-
-  if (tab === 'published') {
-    queueEl.innerHTML = displayList.map(d => `
-      <div class="item-card" style="border-left: 3px solid #3182ce;background:#0d1520">
-        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
-          <h3 style="margin:0">${escapeHtml(d.title)}</h3>
-          <span class="status-pill status-published">PUBLISHED</span>
-        </div>
-        <div class="item-meta" style="margin-top:6px">
-          <span>${escapeHtml(d.platform)}</span> · <span>Published: ${escapeHtml(d.updated_at.slice(0,16))}</span>
-        </div>
-
-        <p style="white-space:pre-wrap;line-height:1.4;max-height:120px;overflow-y:auto;background:#090d12;padding:8px;border-radius:4px;font-size:12px;margin:8px 0;border:1px solid #1a2430">${escapeHtml(d.body)}</p>
-
-        <!-- LIVE URL & 48H METRICS TRACKER -->
-        <div style="background:#142233;border:1px solid #2b6cb0;border-radius:6px;padding:8px 10px;margin:8px 0">
-          <div style="font-size:11px;color:#90cdf4;font-weight:700;margin-bottom:6px">📊 Performance & Live Post Tracking</div>
-          <div style="margin-bottom:6px">
-            <label style="font-size:10px;color:var(--muted);display:block;margin:0 0 2px">Live Post URL</label>
-            <div style="display:flex;gap:4px">
-              <input id="liveUrl_${d.id}" value="${escapeHtml(d.live_url || '')}" placeholder="Paste live post link (e.g. https://linkedin.com/...)" style="font-size:11px;padding:4px 6px;flex:1">
-              ${d.live_url ? `<a href="${escapeHtml(d.live_url)}" target="_blank" class="btn btn-small btn-secondary" style="text-decoration:none;font-size:11px">Open ↗</a>` : ''}
-            </div>
-          </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr auto;gap:6px;align-items:flex-end">
-            <div>
-              <label style="font-size:10px;color:var(--muted);display:block;margin:0 0 2px">Views / Impressions</label>
-              <input type="number" id="views_${d.id}" value="${d.views || 0}" style="font-size:11px;padding:4px 6px;width:100%">
-            </div>
-            <div>
-              <label style="font-size:10px;color:var(--muted);display:block;margin:0 0 2px">Reactions / Comments</label>
-              <input type="number" id="eng_${d.id}" value="${d.engagements || 0}" style="font-size:11px;padding:4px 6px;width:100%">
-            </div>
-            <button class="btn btn-small" style="background:#2b6cb0;color:#fff;font-weight:700;font-size:11px;padding:5px 10px" onclick="saveMetrics(${d.id})">💾 Save Stats</button>
-          </div>
-        </div>
-
-        <div style="display:flex;gap:6px;margin-top:8px">
-          <button class="btn btn-secondary btn-small" onclick="copyDraftText(${d.id})">📋 Copy Text</button>
-          <button class="btn btn-secondary btn-small" onclick="editDraftInStudio(${d.id})">🔄 Repurpose in Studio</button>
-          <button class="btn btn-danger btn-small" onclick="deleteDraft(${d.id})">Delete</button>
-        </div>
-      </div>
-    `).join('');
-    return;
-  }
-
-  // Active Drafts Queue
-  queueEl.innerHTML = displayList.map(d => {
-    const statusClass = d.status === 'Approved' ? 'status-approved' : 'status-draft';
-    return `
-      <div class="item-card" style="border-left: 3px solid #38a169">
-        <!-- TOP 1-CLICK LAUNCH BANNER -->
-        <div style="background:#142233;border:1px solid #2b6cb0;border-radius:6px;padding:8px 10px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;gap:8px">
-          <div>
-            <div style="font-size:10px;color:#90cdf4;font-weight:700;letter-spacing:0.5px">⚡ READY TO PUBLISH</div>
-            <div style="font-size:11px;color:#e2e8f0;margin-top:2px">Copies text & opens ${escapeHtml(d.platform)} in browser</div>
-          </div>
-          <div>
-            ${d.platform === 'X' ? `<button class="btn btn-small" style="background:#1da1f2;color:#fff;font-weight:700;padding:6px 12px;font-size:12px" onclick="copyAndLaunch(${d.id}, 'https://x.com/compose/post')">🚀 Launch to X ↗</button>` : ''}
-            ${d.platform === 'LinkedIn' ? `<button class="btn btn-small" style="background:#0077b5;color:#fff;font-weight:700;padding:6px 12px;font-size:12px" onclick="copyAndLaunch(${d.id}, 'https://www.linkedin.com/feed/')">🚀 Launch to LinkedIn ↗</button>` : ''}
-          </div>
-        </div>
-
-        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
-          <h3 style="margin:0">${escapeHtml(d.title)}</h3>
-          <div style="display:flex;gap:4px;align-items:center;flex-shrink:0">
-            <span class="scheduled-pill">📅 ${escapeHtml(d.scheduled_for || 'Unscheduled')}</span>
-            <span class="status-pill ${statusClass}">${escapeHtml(d.status)}</span>
-          </div>
-        </div>
-        <div class="item-meta" style="justify-content:space-between;margin-top:6px">
-          <div><span>${escapeHtml(d.platform)}</span> · <span>${escapeHtml(d.updated_at.slice(0,10))}</span></div>
-          <select class="slot-select" onchange="updateDraftSchedule(${d.id}, this.value)">
-            <option value="">Reschedule slot…</option>
-            <option value="${getTodaySlot('09:00')}">Today 9:00 AM</option>
-            <option value="${getTodaySlot('14:00')}">Today 2:00 PM</option>
-            <option value="${getTodaySlot('18:30')}">Today 6:30 PM</option>
-            <option value="${getTomorrowSlot('09:00')}">Tomorrow 9:00 AM</option>
-            <option value="${getTomorrowSlot('14:00')}">Tomorrow 2:00 PM</option>
-            <option value="${getTomorrowSlot('18:30')}">Tomorrow 6:30 PM</option>
-          </select>
-        </div>
-        <p style="white-space:pre-wrap;line-height:1.4">${escapeHtml(d.body)}</p>
-
-        ${(d.platform === 'X' && d.body.length > 280 && !d.body.includes('\n\n---\n\n')) ? `
-          <div style="background:#3d1a14;border:1px solid #c53030;border-radius:6px;padding:8px 10px;margin:8px 0;display:flex;justify-content:space-between;align-items:center;gap:6px">
-            <span style="font-size:11px;color:#feb2b2;font-weight:600">⚠️ ${d.body.length} chars (Exceeds X limit of 280)</span>
-            <div style="display:flex;gap:4px">
-              <button class="btn btn-small" style="background:#e53e3e;color:#fff;padding:3px 8px;font-size:11px;font-weight:700" onclick="autoFitXDraft(${d.id})">✂️ Auto-Fit ≤ 280</button>
-              <button class="btn btn-small" style="background:#2b6cb0;color:#fff;padding:3px 8px;font-size:11px;font-weight:700" onclick="splitDraftToThread(${d.id})">🧵 Split to Thread</button>
-            </div>
-          </div>
-        ` : ''}
-
-        ${d.media_url ? `
-          <div style="margin:8px 0;background:#1a202c;border:1px solid #2d3748;border-radius:6px;padding:8px">
-            <img src="${escapeHtml(d.media_url)}" style="max-height:160px;border-radius:4px;display:block;margin-bottom:8px" alt="Attached Media">
-            <div style="display:flex;gap:6px;align-items:center">
-              <button class="btn btn-secondary btn-small" onclick="openMediaFinder('${escapeHtml(d.media_url.split('/').pop())}')">📂 Reveal Image in Finder</button>
-              <a href="${escapeHtml(d.media_url)}" download class="btn btn-secondary btn-small" style="text-decoration:none">📥 Download</a>
-              <span style="font-size:10px;color:var(--muted)">Drag into your post!</span>
-            </div>
-          </div>
-        ` : ''}
-        
-        ${d.image_prompt ? `
-          <div class="image-prompt-box">
-            <strong>🎨 Visual Prompt:</strong> ${escapeHtml(d.image_prompt)}
-            <div style="margin-top:4px">
-              <button class="btn btn-secondary btn-small" onclick="copyPromptText(${d.id})">Copy Prompt</button>
-            </div>
-          </div>
-        ` : ''}
-
-        <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;padding-top:10px;border-top:1px solid var(--line)">
-          <button class="btn btn-secondary btn-small" onclick="editDraftInStudio(${d.id})">✏️ Edit in Studio</button>
-          <button class="btn btn-secondary btn-small" onclick="copyDraftText(${d.id})">📋 Copy Text</button>
-          <button class="btn btn-secondary btn-small" onclick="downloadMarkdown(${d.id})">📥 Export .MD</button>
-          ${d.status !== 'Approved' ? `
-            <button class="btn btn-approve btn-small" onclick="approveDraft(${d.id})">✅ Approve</button>
-          ` : `
-            <button class="btn btn-secondary btn-small" style="color:#bee3f8" onclick="markPublished(${d.id})">Mark Published</button>
-          `}
-          <button class="btn btn-secondary btn-small" onclick="notifyDraft(${d.id})">🔔 Notify</button>
-          <button class="btn btn-danger btn-small" onclick="deleteDraft(${d.id})">Delete</button>
-        </div>
-      </div>
-    `;
-  }).join('');
-}
-
-function copyDraftText(id) {
-  const d = (window._drafts || {})[id];
-  if (!d || !d.body) return;
-  let text = d.body;
-  if (d.platform === 'LinkedIn') {
-    text = cleanMarkdownForSocial(text);
-  } else if (d.platform === 'X') {
-    text = cleanForX(text);
-  }
-  copyText(text);
-}
-
-async function autoFitXDraft(id) {
-  const d = (window._drafts || {})[id];
-  if (!d) return;
-  const res = await fetch('/api/format-x', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({text: d.body})
-  });
-  const data = await res.json();
-  if (data.ok && data.text) {
-    await fetch(`/api/drafts/${id}/update-body`, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({body: data.text})
-    });
-    loadDrafts();
-  }
-}
-
-async function splitDraftToThread(id) {
-  const d = (window._drafts || {})[id];
-  if (!d) return;
-  const res = await fetch('/api/format-thread', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({text: d.body})
-  });
-  const data = await res.json();
-  if (data.ok && data.tweets) {
-    const threadBody = data.tweets.join('\n\n---\n\n');
-    await fetch(`/api/drafts/${id}/update-body`, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({body: threadBody})
-    });
-    loadDrafts();
-  }
-}
-
-function copyPromptText(id) {
-  const d = (window._drafts || {})[id];
-  if (d && d.image_prompt) copyText(d.image_prompt);
-}
-
-async function approveDraft(id) {
-  await fetch(`/api/drafts/${id}/approve`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'});
-  loadDrafts();
-}
-
-async function markPublished(id) {
-  await fetch(`/api/drafts/${id}/publish`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'});
-  loadDrafts();
-}
-
-async function deleteDraft(id) {
-  if (!confirm('Are you sure you want to delete this draft?')) return;
-  await fetch(`/api/drafts/${id}`, {method: 'DELETE'});
-  loadDrafts();
-}
-
-function copyText(str) {
-  navigator.clipboard.writeText(str).then(() => {
-    const toast = document.getElementById('saveToast');
-    if (toast) {
-      toast.textContent = '📋 Copied to clipboard!';
-      toast.style.color = '#9ae6b4';
-      setTimeout(() => { toast.textContent = ''; }, 3000);
-    }
-  });
-}
-
-function editDraftInStudio(id) {
-  const d = (window._drafts || {})[id];
-  if (!d) return;
-  document.getElementById('draftTitle').value = d.title;
-  document.getElementById('draftBody').value = d.body;
-  document.getElementById('draftPlatform').value = d.platform;
-  document.getElementById('draftImagePrompt').value = d.image_prompt || '';
-  document.getElementById('draftSourceUrl').value = d.source_url || '';
-  document.getElementById('draftMediaUrl').value = d.media_url || '';
-  if (d.media_url) {
-    document.getElementById('attachedMediaUrl').textContent = d.media_url;
-    document.getElementById('attachedMediaPreview').style.display = 'block';
-  }
-  updateCharCount();
-  document.getElementById('draftBody').focus();
-}
-
-function downloadMarkdown(id) {
-  window.location.href = `/api/export-markdown?id=${id}`;
-}
-
-function exportDraftsJson() {
-  window.location.href = '/api/export';
-}
-
-function exportAllMarkdown() {
-  window.location.href = '/api/export-all-markdown';
-}
-
-function escapeHtml(s) {
-  return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// PHASE A: OMNI-PLATFORM REPURPOSING
-// ─────────────────────────────────────────────────────────────────────────────
-let _omniBundle = {};
-async function generateOmniBundle() {
-  const title = document.getElementById('draftTitle').value.trim();
-  const context = document.getElementById('draftBody').value.trim();
-  const provider = document.getElementById('aiProvider').value;
-  const tone = document.getElementById('draftTone').value;
-  if (!title && !context) { alert('Enter a title or article text first.'); return; }
-  const btn = document.getElementById('btnOmni');
-  btn.disabled = true; btn.textContent = '⏳ Repurposing All 3…';
-  try {
-    const liRes = await fetch('/api/generate', {method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({task:'draft_post', title, context, platform:'LinkedIn', tone, provider})});
-    const liData = await liRes.json();
-    btn.textContent = '⏳ Formatted LinkedIn (1/3)…';
-
-    const xRes = await fetch('/api/generate', {method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({task:'draft_post', title, context, platform:'X', tone, provider})});
-    const xData = await xRes.json();
-    btn.textContent = '⏳ Formatted X Thread (2/3)…';
-
-    const ytRes = await fetch('/api/generate', {method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({task:'draft_post', title, context, platform:'YouTube', tone, provider})});
-    const ytData = await ytRes.json();
-
-    const fbRes = await fetch('/api/generate', {method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({task:'draft_post', title, context, platform:'Facebook', tone, provider})});
-    const fbData = await fbRes.json();
-    btn.textContent = '⏳ Formatted Facebook (4/4)…';
-
-    _omniBundle = {
-      linkedin: liData.ok ? liData.result : 'Error: ' + liData.error,
-      x: xData.ok ? xData.result : 'Error: ' + xData.error,
-      youtube: ytData.ok ? ytData.result : 'Error: ' + ytData.error,
-      facebook: fbData.ok ? fbData.result : 'Error: ' + fbData.error,
-      image_prompt: liData.image_prompt || ''
-    };
-    document.getElementById('omniLinkedin').textContent = _omniBundle.linkedin;
-    document.getElementById('omniX').textContent = _omniBundle.x;
-    document.getElementById('omniYoutube').textContent = _omniBundle.youtube;
-    document.getElementById('omniFacebook').textContent = _omniBundle.facebook;
-    document.getElementById('omniBundleTabs').style.display = 'block';
-    if (liData.image_prompt) document.getElementById('draftImagePrompt').value = liData.image_prompt;
-  } catch(e) { alert('Omni-bundle generation failed: ' + e); }
-  finally { btn.disabled = false; btn.textContent = 'Generate All Platforms'; }
-}
-
-function showOmniTab(tab, el) {
-  ['linkedin','x','youtube','facebook'].forEach(t => {
-    document.getElementById('omni' + t.charAt(0).toUpperCase() + t.slice(1)).style.display = t === tab ? 'block' : 'none';
-  });
-  document.querySelectorAll('.omni-platform-tab').forEach(b => b.classList.remove('active'));
-  el.classList.add('active');
-}
-
-function loadOmniToDraft(tab) {
-  const text = _omniBundle[tab];
-  if (!text) return;
-  document.getElementById('draftBody').value = text;
-  document.getElementById('draftPlatform').value = tab === 'x' ? 'X' : (tab === 'youtube' ? 'YouTube' : 'LinkedIn');
-  updateCharCount();
-}
-
-async function saveOmniBundle() {
-  if (!_omniBundle.linkedin) { alert('Generate bundle first.'); return; }
-  const title = document.getElementById('draftTitle').value.trim() || 'Omni Bundle';
-  const platforms = [{key:'linkedin', platform:'LinkedIn'}, {key:'x', platform:'X'}, {key:'youtube', platform:'YouTube'}, {key:'facebook', platform:'Facebook'}];
-  for (const p of platforms) {
-    await fetch('/api/drafts', {method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({title: `${title} (${p.platform})`, body: _omniBundle[p.key], platform: p.platform,
-        image_prompt: _omniBundle.image_prompt || '', source_url: '', media_url: ''})
-    });
-  }
-  alert('✅ Saved 3 platform drafts to queue!');
-  loadDrafts();
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// PHASE C: DRAW THINGS LOCAL IMAGE GENERATION
-// ─────────────────────────────────────────────────────────────────────────────
-let _generatedImageFilename = '';
-async function checkDrawThingsStatus() {
-  try {
-    const res = await fetch('/api/draw-things-status');
-    const data = await res.json();
-    const el = document.getElementById('dtStatus');
-    if (data.available) {
-      el.innerHTML = '<span class="draw-things-status dt-online">🟢 Draw Things Online (127.0.0.1:7860)</span>';
-    } else {
-      el.innerHTML = '<span class="draw-things-status" style="background:#1b251f;border:1px solid #28382e;color:var(--muted);font-size:11px;padding:3px 8px;border-radius:4px;display:inline-block">⚪ Draw Things Offline (Optional Local AI Art — enable API in Draw Things Settings)</span>';
-    }
-  } catch(e) {}
-}
-
-async function generateLocalImage() {
-  const prompt = document.getElementById('draftImagePrompt').value.trim();
-  if (!prompt) { alert('Generate or enter a visual prompt first.'); return; }
-  const btn = document.getElementById('btnGenImage');
-  btn.disabled = true; btn.textContent = '⏳ Generating…';
-  try {
-    const res = await fetch('/api/generate-image', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({prompt, width: 1024, height: 576, steps: 20})
-    });
-    const data = await res.json();
-    if (data.ok) {
-      _generatedImageFilename = data.filename;
-      document.getElementById('generatedImg').src = `/api/media/${data.filename}`;
-      document.getElementById('generatedImagePreview').style.display = 'block';
-    } else {
-      alert('Draw Things image generation: ' + data.error);
-    }
-  } catch(e) { alert('Failed to connect to Draw Things API: ' + e); }
-  finally { btn.disabled = false; btn.textContent = '🖼️ Draw Things (Local AI)'; }
-}
-
-function attachGeneratedImage() {
-  if (!_generatedImageFilename) return;
-  const url = `/api/media/${_generatedImageFilename}`;
-  document.getElementById('draftMediaUrl').value = url;
-  document.getElementById('attachedMediaUrl').textContent = _generatedImageFilename;
-  document.getElementById('attachedMediaPreview').style.display = 'block';
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// PHASE E: WEBHOOKS
-// ─────────────────────────────────────────────────────────────────────────────
-function toggleWebhookSettings() {
-  const el = document.getElementById('webhookSettings');
-  el.style.display = el.style.display === 'none' ? 'block' : 'none';
-}
-
-async function saveWebhooks() {
-  const discord = document.getElementById('discordWebhook').value.trim();
-  const slack = document.getElementById('slackWebhook').value.trim();
-  const custom = document.getElementById('customWebhook').value.trim();
-  const res = await fetch('/api/webhooks/save', {
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({discord, slack, custom})
-  });
-  const data = await res.json();
-  alert(data.ok ? '✅ Webhook URLs saved!' : 'Error: ' + data.error);
-}
-
-async function testWebhook(target) {
-  const res = await fetch('/api/webhooks/test', {
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({target})
-  });
-  const data = await res.json();
-  alert(data.ok ? `✅ Test webhook delivered! Status: ${data.status}` : `❌ Failed: ${data.error}`);
-}
-
-async function notifyDraft(id) {
-  const d = (window._drafts || {})[id];
-  if (!d) return;
-  const target = prompt('Send to which webhook? (discord / slack / custom):', 'discord');
-  if (!target) return;
-  const res = await fetch(`/api/drafts/${id}/notify`, {
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({target})
-  });
-  const data = await res.json();
-  alert(data.ok ? `✅ Draft notification sent to ${target}!` : `❌ Notification error: ${data.error}`);
-}
-
-// Initial bootstrap
-loadStatus();
-// Default to Apple Developer News on load
-document.getElementById('rssPreset').value = 'https://developer.apple.com/news/rss/news.rss';
-fetchFeed('https://developer.apple.com/news/rss/news.rss');
-loadDrafts();
-checkDrawThingsStatus();
-setInterval(checkDrawThingsStatus, 30000);
-</script>
-</body>
-</html>"""
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -2909,12 +1733,32 @@ class Handler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query)
 
             if path == "/favicon.ico":
-                self.send_response(204)
-                self.end_headers()
+                favicon = os.path.join(_STATIC_DIR, "favicon.svg")
+                if os.path.isfile(favicon):
+                    with open(favicon, "rb") as f:
+                        self._send(f.read(), content_type="image/svg+xml")
+                else:
+                    self.send_response(204)
+                    self.end_headers()
                 return
 
-            if path == "/":
-                self._send(HTML.encode("utf-8"))
+            # Serve built JS/CSS/assets from the React build (static/assets/*)
+            if path.startswith("/assets/") or path.startswith("/static/assets/"):
+                import mimetypes
+                rel = path[len("/assets/"):] if path.startswith("/assets/") else path[len("/static/assets/"):]
+                rel = rel.replace("..", "")
+                file_path = os.path.join(_STATIC_DIR, "assets", rel)
+                if os.path.isfile(file_path):
+                    mime, _ = mimetypes.guess_type(file_path)
+                    with open(file_path, "rb") as f:
+                        self._send(f.read(), content_type=mime or "application/octet-stream")
+                else:
+                    self.send_error(404)
+                return
+
+            # SPA fallback: any non-API route serves the React app
+            if not path.startswith("/api/"):
+                self._send(_load_html().encode("utf-8"))
                 return
 
             if path == "/api/status":
@@ -2944,6 +1788,164 @@ class Handler(BaseHTTPRequestHandler):
                 q = query.get("q", [""])[0]
                 results = search_gifs(q)
                 self.send_json(results)
+                return
+
+            # Dashboard stats
+            if path == "/api/dashboard-stats":
+                with db() as conn:
+                    total = conn.execute("SELECT COUNT(*) AS c FROM drafts").fetchone()["c"]
+                    active = conn.execute("SELECT COUNT(*) AS c FROM drafts WHERE status IN ('Draft', 'Approved')").fetchone()["c"]
+                    published = conn.execute("SELECT COUNT(*) AS c FROM drafts WHERE status = 'Published'").fetchone()["c"]
+                    scheduled = conn.execute("SELECT COUNT(*) AS c FROM drafts WHERE scheduled_for != '' AND status IN ('Draft', 'Approved')").fetchone()["c"]
+                    rejected = conn.execute("SELECT COUNT(*) AS c FROM rejected_sources").fetchone()["c"]
+                    # Platform breakdown
+                    platform_rows = conn.execute("SELECT platform, COUNT(*) AS c FROM drafts WHERE status IN ('Draft', 'Approved') GROUP BY platform").fetchall()
+                    platform_breakdown = {r["platform"]: r["c"] for r in platform_rows}
+                    # Recent activity (last 7 days)
+                    week_ago = (datetime.now() - __import__('datetime').timedelta(days=7)).strftime("%Y-%m-%d")
+                    recent = conn.execute("SELECT COUNT(*) AS c FROM drafts WHERE created_at >= ?", (week_ago,)).fetchone()["c"]
+                    # Tag breakdown
+                    tag_rows = conn.execute("SELECT tags FROM drafts WHERE tags != ''").fetchall()
+                    tag_counts = {}
+                    for r in tag_rows:
+                        for t in r["tags"].split(","):
+                            t = t.strip()
+                            if t:
+                                tag_counts[t] = tag_counts.get(t, 0) + 1
+                self.send_json({
+                    "total": total,
+                    "active": active,
+                    "published": published,
+                    "scheduled": scheduled,
+                    "rejected": rejected,
+                    "recent_7days": recent,
+                    "platform_breakdown": platform_breakdown,
+                    "tag_counts": tag_counts
+                })
+                return
+
+            # Templates CRUD
+            if path == "/api/templates" and self.command == "GET":
+                with db() as conn:
+                    rows = [dict(r) for r in conn.execute("SELECT * FROM templates ORDER BY name")]
+                self.send_json(rows)
+                return
+
+            if path == "/api/templates" and self.command == "POST":
+                name = string_field(payload, "name")
+                if not name:
+                    raise ApiError(400, "Template name is required")
+                platform = string_field(payload, "platform") or "General"
+                title_template = string_field(payload, "title_template")
+                body_template = string_field(payload, "body_template")
+                image_prompt_template = string_field(payload, "image_prompt_template")
+                tags = string_field(payload, "tags")
+                stamp = now_iso()
+                with db() as conn:
+                    cur = conn.execute(
+                        """INSERT INTO templates(name, platform, title_template, body_template, image_prompt_template, tags, created_at, updated_at)
+                           VALUES(?,?,?,?,?,?,?,?)""",
+                        (name, platform, title_template, body_template, image_prompt_template, tags, stamp, stamp)
+                    )
+                    template_id = cur.lastrowid
+                self.send_json({"ok": True, "id": template_id}, 201)
+                return
+
+            if path.startswith("/api/templates/") and path.endswith("/delete") and self.command == "POST":
+                template_id = path.split("/")[3]
+                with db() as conn:
+                    conn.execute("DELETE FROM templates WHERE id = ?", (template_id,))
+                self.send_json({"ok": True})
+                return
+
+            # Bulk operations
+            if path == "/api/drafts/bulk-approve" and self.command == "POST":
+                ids = payload.get("ids", [])
+                stamp = now_iso()
+                with db() as conn:
+                    for did in ids:
+                        conn.execute("UPDATE drafts SET status = 'Approved', updated_at = ? WHERE id = ?", (stamp, did))
+                self.send_json({"ok": True, "count": len(ids)})
+                return
+
+            if path == "/api/drafts/bulk-delete" and self.command == "POST":
+                ids = payload.get("ids", [])
+                with db() as conn:
+                    for did in ids:
+                        conn.execute("DELETE FROM drafts WHERE id = ?", (did,))
+                self.send_json({"ok": True, "count": len(ids)})
+                return
+
+            if path == "/api/drafts/bulk-schedule" and self.command == "POST":
+                ids = payload.get("ids", [])
+                scheduled_for = string_field(payload, "scheduled_for")
+                stamp = now_iso()
+                auto_publish = 1 if scheduled_for else 0
+                with db() as conn:
+                    for did in ids:
+                        conn.execute("UPDATE drafts SET scheduled_for = ?, auto_publish = ?, updated_at = ? WHERE id = ?", (scheduled_for, auto_publish, stamp, did))
+                self.send_json({"ok": True, "count": len(ids), "scheduled_for": scheduled_for})
+                return
+
+            # Draft version history
+            if path.startswith("/api/drafts/") and path.endswith("/versions") and self.command == "GET":
+                draft_id = path.split("/")[3]
+                with db() as conn:
+                    rows = [dict(r) for r in conn.execute("SELECT * FROM draft_versions WHERE draft_id = ? ORDER BY version_number DESC", (draft_id,))]
+                self.send_json(rows)
+                return
+
+            if path.startswith("/api/drafts/") and path.endswith("/revert") and self.command == "POST":
+                draft_id = path.split("/")[3]
+                version_id = payload.get("version_id")
+                stamp = now_iso()
+                with db() as conn:
+                    vrow = conn.execute("SELECT * FROM draft_versions WHERE id = ? AND draft_id = ?", (version_id, draft_id)).fetchone()
+                    if not vrow:
+                        raise ApiError(404, "Version not found")
+                    vrow = dict(vrow)
+                    conn.execute(
+                        "UPDATE drafts SET title = ?, body = ?, platform = ?, image_prompt = ?, tags = ?, updated_at = ? WHERE id = ?",
+                        (vrow["title"], vrow["body"], vrow["platform"], vrow["image_prompt"], vrow["tags"], stamp, draft_id)
+                    )
+                log_activity("draft_reverted", "draft", int(draft_id), f"Reverted to version {vrow['version_number']}")
+                self.send_json({"ok": True, "version": vrow["version_number"]})
+                return
+
+            # Activity log
+            if path == "/api/activity-log":
+                limit = int(query.get("limit", ["50"])[0])
+                with db() as conn:
+                    rows = [dict(r) for r in conn.execute("SELECT * FROM activity_log ORDER BY id DESC LIMIT ?", (limit,))]
+                self.send_json(rows)
+                return
+
+            # Engagement metrics update
+            if path.startswith("/api/drafts/") and path.endswith("/engagement") and self.command == "POST":
+                draft_id = path.split("/")[3]
+                views = payload.get("views", 0)
+                engagements = payload.get("engagements", 0)
+                stamp = now_iso()
+                with db() as conn:
+                    conn.execute("UPDATE drafts SET views = ?, engagements = ?, updated_at = ? WHERE id = ?", (views, engagements, stamp, draft_id))
+                log_activity("engagement_updated", "draft", int(draft_id), f"Views: {views}, Engagements: {engagements}")
+                self.send_json({"ok": True})
+                return
+
+            # Source provenance for a draft
+            if path.startswith("/api/drafts/") and path.endswith("/provenance") and self.command == "GET":
+                draft_id = path.split("/")[3]
+                with db() as conn:
+                    draft = conn.execute("SELECT source_url, title, created_at FROM drafts WHERE id = ?", (draft_id,)).fetchone()
+                    if not draft:
+                        raise ApiError(404, "Draft not found")
+                    draft = dict(draft)
+                    source = None
+                    if draft["source_url"]:
+                        src = conn.execute("SELECT * FROM sources WHERE url = ?", (draft["source_url"],)).fetchone()
+                        if src:
+                            source = dict(src)
+                self.send_json({"draft": draft, "source": source})
                 return
 
             if path == "/api/drafts":
@@ -3001,6 +2003,49 @@ class Handler(BaseHTTPRequestHandler):
                 raw = ("# JustMeMedia ContentOS Export\n\n" + "\n".join(blocks)).encode("utf-8")
                 self._send(raw, content_type="text/markdown; charset=utf-8",
                            extra_headers={"Content-Disposition": 'attachment; filename="all_contentos_drafts.md"'})
+                return
+
+            # Rejected sources list (so dismissed articles stay out of the feed)
+            if path == "/api/rejected-sources":
+                with db() as conn:
+                    rows = [dict(r) for r in conn.execute("SELECT * FROM rejected_sources ORDER BY id DESC")]
+                self.send_json(rows)
+                return
+
+            # --- GitHub Trending APIs ---
+            if path == "/api/github/trending":
+                lang = query.get("language", [""])[0]
+                days = int(query.get("days", ["7"])[0])
+                try:
+                    repos = fetch_github_trending("all", lang, days)
+                    self.send_json({"ok": True, "repos": repos, "count": len(repos)})
+                except Exception as exc:
+                    self.send_error_json(500, str(exc))
+                return
+
+            if path == "/api/github/fetch":
+                lang = query.get("language", [""])[0]
+                category = query.get("category", ["General"])[0]
+                days = int(query.get("days", ["7"])[0])
+                try:
+                    repos = fetch_github_trending("all", lang, days)
+                    stored = store_github_repos(repos, category)
+                    self.send_json({"ok": True, "fetched": len(repos), "stored": stored})
+                except Exception as exc:
+                    self.send_error_json(500, str(exc))
+                return
+
+            if path == "/api/github/top10":
+                category = query.get("category", ["General"])[0]
+                platform = query.get("platform", ["LinkedIn"])[0]
+                try:
+                    bundle = generate_weekly_github_bundle(category, platform)
+                    if bundle["ok"]:
+                        self.send_json(bundle)
+                    else:
+                        self.send_error_json(404, bundle.get("error", "No data"))
+                except Exception as exc:
+                    self.send_error_json(500, str(exc))
                 return
 
             # Phase C: Draw Things status
@@ -3100,6 +2145,7 @@ class Handler(BaseHTTPRequestHandler):
                     conn.execute("UPDATE drafts SET status = 'Approved', updated_at = ? WHERE id = ?", (stamp, draft_id))
                     conn.execute("INSERT INTO approvals(draft_id, approved_at, platform, notes) VALUES(?,?,?,?)",
                                  (draft_id, stamp, "General", "Approved by human user"))
+                log_activity("draft_approved", "draft", int(draft_id), "Draft approved for publishing")
                 self.send_json({"ok": True, "status": "Approved"})
                 return
 
@@ -3109,6 +2155,7 @@ class Handler(BaseHTTPRequestHandler):
                 stamp = now_iso()
                 with db() as conn:
                     conn.execute("UPDATE drafts SET status = 'Published', updated_at = ? WHERE id = ?", (stamp, draft_id))
+                log_activity("draft_published", "draft", int(draft_id), "Draft published")
                 self.send_json({"ok": True, "status": "Published"})
                 return
 
@@ -3138,6 +2185,28 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(payload, dict):
                 raise ApiError(400, "JSON payload must be an object.")
 
+            # Reject / dismiss a source article so it stops appearing in the feed
+            if path == "/api/reject-source":
+                url = string_field(payload, "url")
+                title = string_field(payload, "title")
+                if not url:
+                    raise ApiError(400, "Source URL is required to reject an article.")
+                stamp = now_iso()
+                with db() as conn:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO rejected_sources(url, title, rejected_at) VALUES(?,?,?)",
+                        (url, title[:200], stamp)
+                    )
+                self.send_json({"ok": True, "url": url})
+                return
+
+            # Clear all rejected sources so dismissed articles reappear in the feed
+            if path == "/api/rejected-sources/clear":
+                with db() as conn:
+                    cur = conn.execute("DELETE FROM rejected_sources")
+                self.send_json({"ok": True, "cleared": cur.rowcount})
+                return
+
             # Thread Formatter
             if path == "/api/format-thread":
                 text = string_field(payload, "text")
@@ -3152,13 +2221,45 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True, "text": clean, "length": len(clean)})
                 return
 
+            # Weekly GitHub Top 10 bundle generation
+            if path == "/api/github/weekly":
+                category = string_field(payload, "category") or "General"
+                platform = string_field(payload, "platform") or "LinkedIn"
+                try:
+                    # First ensure we have fresh repos
+                    repos = fetch_github_trending("all", "", 7)
+                    stored = store_github_repos(repos, category)
+                    bundle = generate_weekly_github_bundle(category, platform)
+                    if not bundle["ok"]:
+                        raise ValueError("Failed to generate bundle")
+                    self.send_json({"ok": True, "fetched": len(repos), "stored": stored, **bundle})
+                except Exception as exc:
+                    self.send_error_json(500, str(exc))
+                return
+
             # Update Draft Body (for auto-fit and split thread on draft card)
             if path.startswith("/api/drafts/") and path.endswith("/update-body"):
                 draft_id = path.split("/")[3]
                 body_text = string_field(payload, "body")
+                tags = string_field(payload, "tags")
                 stamp = now_iso()
                 with db() as conn:
-                    conn.execute("UPDATE drafts SET body = ?, updated_at = ? WHERE id = ?", (body_text, stamp, draft_id))
+                    # Get current draft for version snapshot
+                    cur = conn.execute("SELECT title, body, platform, image_prompt, tags FROM drafts WHERE id = ?", (draft_id,))
+                    current = cur.fetchone()
+                    if current:
+                        vcur = conn.execute("SELECT COALESCE(MAX(version_number), 0) + 1 AS next_v FROM draft_versions WHERE draft_id = ?", (draft_id,))
+                        next_v = vcur.fetchone()["next_v"]
+                        conn.execute(
+                            """INSERT INTO draft_versions(draft_id, version_number, title, body, platform, image_prompt, tags, saved_at)
+                               VALUES(?,?,?,?,?,?,?,?)""",
+                            (int(draft_id), next_v, current["title"], current["body"], current["platform"], current["image_prompt"], current["tags"], stamp)
+                        )
+                    if tags:
+                        conn.execute("UPDATE drafts SET body = ?, tags = ?, updated_at = ? WHERE id = ?", (body_text, tags, stamp, draft_id))
+                    else:
+                        conn.execute("UPDATE drafts SET body = ?, updated_at = ? WHERE id = ?", (body_text, stamp, draft_id))
+                log_activity("draft_updated", "draft", int(draft_id), f"Updated draft body ({len(body_text)} chars)")
                 self.send_json({"ok": True, "body": body_text})
                 return
 
@@ -3376,14 +2477,15 @@ class Handler(BaseHTTPRequestHandler):
                 }, 201)
                 return
 
-            # Update draft schedule
+            # Update draft schedule (auto_publish=1 means it will auto-publish at the scheduled time)
             if path.startswith("/api/drafts/") and path.endswith("/schedule"):
                 draft_id = path.split("/")[3]
                 scheduled_for = string_field(payload, "scheduled_for")
+                auto_publish = 1 if scheduled_for else 0
                 stamp = now_iso()
                 with db() as conn:
-                    conn.execute("UPDATE drafts SET scheduled_for = ?, updated_at = ? WHERE id = ?", (scheduled_for, stamp, draft_id))
-                self.send_json({"ok": True, "scheduled_for": scheduled_for})
+                    conn.execute("UPDATE drafts SET scheduled_for = ?, auto_publish = ?, updated_at = ? WHERE id = ?", (scheduled_for, auto_publish, stamp, draft_id))
+                self.send_json({"ok": True, "scheduled_for": scheduled_for, "auto_publish": auto_publish})
                 return
 
             # AI Generation
@@ -3462,6 +2564,164 @@ class Handler(BaseHTTPRequestHandler):
                     return
 
             # Save draft
+            # Dashboard stats
+            if path == "/api/dashboard-stats":
+                with db() as conn:
+                    total = conn.execute("SELECT COUNT(*) AS c FROM drafts").fetchone()["c"]
+                    active = conn.execute("SELECT COUNT(*) AS c FROM drafts WHERE status IN ('Draft', 'Approved')").fetchone()["c"]
+                    published = conn.execute("SELECT COUNT(*) AS c FROM drafts WHERE status = 'Published'").fetchone()["c"]
+                    scheduled = conn.execute("SELECT COUNT(*) AS c FROM drafts WHERE scheduled_for != '' AND status IN ('Draft', 'Approved')").fetchone()["c"]
+                    rejected = conn.execute("SELECT COUNT(*) AS c FROM rejected_sources").fetchone()["c"]
+                    # Platform breakdown
+                    platform_rows = conn.execute("SELECT platform, COUNT(*) AS c FROM drafts WHERE status IN ('Draft', 'Approved') GROUP BY platform").fetchall()
+                    platform_breakdown = {r["platform"]: r["c"] for r in platform_rows}
+                    # Recent activity (last 7 days)
+                    week_ago = (datetime.now() - __import__('datetime').timedelta(days=7)).strftime("%Y-%m-%d")
+                    recent = conn.execute("SELECT COUNT(*) AS c FROM drafts WHERE created_at >= ?", (week_ago,)).fetchone()["c"]
+                    # Tag breakdown
+                    tag_rows = conn.execute("SELECT tags FROM drafts WHERE tags != ''").fetchall()
+                    tag_counts = {}
+                    for r in tag_rows:
+                        for t in r["tags"].split(","):
+                            t = t.strip()
+                            if t:
+                                tag_counts[t] = tag_counts.get(t, 0) + 1
+                self.send_json({
+                    "total": total,
+                    "active": active,
+                    "published": published,
+                    "scheduled": scheduled,
+                    "rejected": rejected,
+                    "recent_7days": recent,
+                    "platform_breakdown": platform_breakdown,
+                    "tag_counts": tag_counts
+                })
+                return
+
+            # Templates CRUD
+            if path == "/api/templates" and self.command == "GET":
+                with db() as conn:
+                    rows = [dict(r) for r in conn.execute("SELECT * FROM templates ORDER BY name")]
+                self.send_json(rows)
+                return
+
+            if path == "/api/templates" and self.command == "POST":
+                name = string_field(payload, "name")
+                if not name:
+                    raise ApiError(400, "Template name is required")
+                platform = string_field(payload, "platform") or "General"
+                title_template = string_field(payload, "title_template")
+                body_template = string_field(payload, "body_template")
+                image_prompt_template = string_field(payload, "image_prompt_template")
+                tags = string_field(payload, "tags")
+                stamp = now_iso()
+                with db() as conn:
+                    cur = conn.execute(
+                        """INSERT INTO templates(name, platform, title_template, body_template, image_prompt_template, tags, created_at, updated_at)
+                           VALUES(?,?,?,?,?,?,?,?)""",
+                        (name, platform, title_template, body_template, image_prompt_template, tags, stamp, stamp)
+                    )
+                    template_id = cur.lastrowid
+                self.send_json({"ok": True, "id": template_id}, 201)
+                return
+
+            if path.startswith("/api/templates/") and path.endswith("/delete") and self.command == "POST":
+                template_id = path.split("/")[3]
+                with db() as conn:
+                    conn.execute("DELETE FROM templates WHERE id = ?", (template_id,))
+                self.send_json({"ok": True})
+                return
+
+            # Bulk operations
+            if path == "/api/drafts/bulk-approve" and self.command == "POST":
+                ids = payload.get("ids", [])
+                stamp = now_iso()
+                with db() as conn:
+                    for did in ids:
+                        conn.execute("UPDATE drafts SET status = 'Approved', updated_at = ? WHERE id = ?", (stamp, did))
+                self.send_json({"ok": True, "count": len(ids)})
+                return
+
+            if path == "/api/drafts/bulk-delete" and self.command == "POST":
+                ids = payload.get("ids", [])
+                with db() as conn:
+                    for did in ids:
+                        conn.execute("DELETE FROM drafts WHERE id = ?", (did,))
+                self.send_json({"ok": True, "count": len(ids)})
+                return
+
+            if path == "/api/drafts/bulk-schedule" and self.command == "POST":
+                ids = payload.get("ids", [])
+                scheduled_for = string_field(payload, "scheduled_for")
+                stamp = now_iso()
+                auto_publish = 1 if scheduled_for else 0
+                with db() as conn:
+                    for did in ids:
+                        conn.execute("UPDATE drafts SET scheduled_for = ?, auto_publish = ?, updated_at = ? WHERE id = ?", (scheduled_for, auto_publish, stamp, did))
+                self.send_json({"ok": True, "count": len(ids), "scheduled_for": scheduled_for})
+                return
+
+            # Draft version history
+            if path.startswith("/api/drafts/") and path.endswith("/versions") and self.command == "GET":
+                draft_id = path.split("/")[3]
+                with db() as conn:
+                    rows = [dict(r) for r in conn.execute("SELECT * FROM draft_versions WHERE draft_id = ? ORDER BY version_number DESC", (draft_id,))]
+                self.send_json(rows)
+                return
+
+            if path.startswith("/api/drafts/") and path.endswith("/revert") and self.command == "POST":
+                draft_id = path.split("/")[3]
+                version_id = payload.get("version_id")
+                stamp = now_iso()
+                with db() as conn:
+                    vrow = conn.execute("SELECT * FROM draft_versions WHERE id = ? AND draft_id = ?", (version_id, draft_id)).fetchone()
+                    if not vrow:
+                        raise ApiError(404, "Version not found")
+                    vrow = dict(vrow)
+                    conn.execute(
+                        "UPDATE drafts SET title = ?, body = ?, platform = ?, image_prompt = ?, tags = ?, updated_at = ? WHERE id = ?",
+                        (vrow["title"], vrow["body"], vrow["platform"], vrow["image_prompt"], vrow["tags"], stamp, draft_id)
+                    )
+                log_activity("draft_reverted", "draft", int(draft_id), f"Reverted to version {vrow['version_number']}")
+                self.send_json({"ok": True, "version": vrow["version_number"]})
+                return
+
+            # Activity log
+            if path == "/api/activity-log":
+                limit = int(query.get("limit", ["50"])[0])
+                with db() as conn:
+                    rows = [dict(r) for r in conn.execute("SELECT * FROM activity_log ORDER BY id DESC LIMIT ?", (limit,))]
+                self.send_json(rows)
+                return
+
+            # Engagement metrics update
+            if path.startswith("/api/drafts/") and path.endswith("/engagement") and self.command == "POST":
+                draft_id = path.split("/")[3]
+                views = payload.get("views", 0)
+                engagements = payload.get("engagements", 0)
+                stamp = now_iso()
+                with db() as conn:
+                    conn.execute("UPDATE drafts SET views = ?, engagements = ?, updated_at = ? WHERE id = ?", (views, engagements, stamp, draft_id))
+                log_activity("engagement_updated", "draft", int(draft_id), f"Views: {views}, Engagements: {engagements}")
+                self.send_json({"ok": True})
+                return
+
+            # Source provenance for a draft
+            if path.startswith("/api/drafts/") and path.endswith("/provenance") and self.command == "GET":
+                draft_id = path.split("/")[3]
+                with db() as conn:
+                    draft = conn.execute("SELECT source_url, title, created_at FROM drafts WHERE id = ?", (draft_id,)).fetchone()
+                    if not draft:
+                        raise ApiError(404, "Draft not found")
+                    draft = dict(draft)
+                    source = None
+                    if draft["source_url"]:
+                        src = conn.execute("SELECT * FROM sources WHERE url = ?", (draft["source_url"],)).fetchone()
+                        if src:
+                            source = dict(src)
+                self.send_json({"draft": draft, "source": source})
+                return
+
             if path == "/api/drafts":
                 title = string_field(payload, "title")
                 if not title:
@@ -3471,15 +2731,23 @@ class Handler(BaseHTTPRequestHandler):
                 image_prompt = string_field(payload, "image_prompt")
                 source_url = string_field(payload, "source_url")
                 media_url = string_field(payload, "media_url")
+                tags = string_field(payload, "tags")
                 scheduled_for = string_field(payload, "scheduled_for") or calculate_next_optimal_slot()
                 stamp = now_iso()
                 with db() as conn:
                     cur = conn.execute(
-                        """INSERT INTO drafts(title, body, platform, status, image_prompt, source_url, media_url, scheduled_for, created_at, updated_at)
-                           VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                        (title[:200], body, platform[:40], "Draft", image_prompt, source_url, media_url, scheduled_for, stamp, stamp)
+                        """INSERT INTO drafts(title, body, platform, status, image_prompt, source_url, media_url, scheduled_for, tags, created_at, updated_at)
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                        (title[:200], body, platform[:40], "Draft", image_prompt, source_url, media_url, scheduled_for, tags, stamp, stamp)
                     )
                     draft_id = cur.lastrowid
+                    # Save initial version
+                    conn.execute(
+                        """INSERT INTO draft_versions(draft_id, version_number, title, body, platform, image_prompt, tags, saved_at)
+                           VALUES(?,?,?,?,?,?,?,?)""",
+                        (draft_id, 1, title[:200], body, platform[:40], image_prompt, tags, stamp)
+                    )
+                log_activity("draft_created", "draft", draft_id, f"Created draft: {title[:60]}")
                 self.send_json({"ok": True, "id": draft_id, "scheduled_for": scheduled_for}, 201)
                 return
 
@@ -3547,8 +2815,14 @@ class Handler(BaseHTTPRequestHandler):
         print("[ContentOS] " + (fmt % args))
 
 
+# Notification toggle — set to True to re-enable notifications
+NOTIFICATIONS_ENABLED = False
+
 def main():
     connect_db().close()
+    if NOTIFICATIONS_ENABLED:
+        start_scheduler_daemon()
+    start_daily_scrape_daemon()
     try:
         server = ThreadingHTTPServer((HOST, PORT), Handler)
     except OSError as e:

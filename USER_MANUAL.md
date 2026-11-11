@@ -436,7 +436,7 @@ Run the built-in test suite at any time from the project root:
 ```bash
 PYTHONPATH=. python3 -B -m unittest -v tests/test_server.py
 ```
-All **25/25 unit tests** will execute and verify database schema, security headers, anti-slop filters, viral hooks, thread formatters, carousel generators, webhook builders, Deep Research dossiers, and LinkedIn markdown formatters.
+All **37/37 unit tests** will execute and verify database schema, security headers, anti-slop filters, viral hooks, thread formatters, carousel generators, webhook builders, Deep Research dossiers, and LinkedIn markdown formatters.
 
 ---
 

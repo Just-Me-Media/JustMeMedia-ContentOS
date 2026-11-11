@@ -1,3 +1,7 @@
+<!-- ⚠️ DEPRECATED — do not use directly. This Phase 1 scaffold was merged into
+the main `app/server.py`. The project is now a fully functional, local-first
+content operations system. See `README.md` for current status. -->
+
 # ContentOS Phase 1 implementation
 
 This is the first runnable local application layer. It uses only Python's standard

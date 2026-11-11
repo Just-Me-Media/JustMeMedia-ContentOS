@@ -13,6 +13,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import sys
 import time
 from datetime import datetime, timezone
@@ -29,6 +30,7 @@ from app.server import (
 )
 
 # Verified primary sources — checked live 2026-11-10
+# Updated: 2026-11-11 — Added top tech news sites (TechCrunch, The Verge, WIRED, Ars Technica, CNET, Techmeme)
 DEFAULT_FEEDS = [
     # 🍎 Apple official
     "https://developer.apple.com/news/rss/news.rss",
@@ -43,12 +45,19 @@ DEFAULT_FEEDS = [
     "https://techcrunch.com/tag/xai/feed/",
     "https://techcrunch.com/tag/meta-ai/feed/",
     "https://techcrunch.com/tag/microsoft-ai/feed/",
+    # 📰 Top Tech News Sites (curated from Google search)
+    "https://techcrunch.com/category/artificial-intelligence/feed/",       # Startups, VC, breaking news
+    "https://techcrunch.com/feed/",                                       # TechCrunch general
+    "https://www.theverge.com/rss/index.xml",                             # General tech, gadgets, culture
+    "https://www.wired.com/feed/rss",                                     # Deep tech, science, cyber-culture
+    "https://feeds.arstechnica.com/arstechnica/index",                    # Software, security, power users
+    "https://www.cnet.com/rss/all/",                                      # Consumer advice, reviews
+    "https://www.techmeme.com/feed.xml",                                  # Real-time tech news aggregator
     # 📰 Tech & AI aggregators
-    "https://techcrunch.com/category/artificial-intelligence/feed/",
     "https://www.technologyreview.com/topic/artificial-intelligence/feed/",
-    "https://feeds.arstechnica.com/arstechnica/index",
     "https://news.ycombinator.com/rss",
     "https://rss.nytimes.com/services/xml/rss/nyt/Technology.xml",
+    "https://hnrss.org/frontpage",
 ]
 
 
@@ -109,7 +118,7 @@ def run_worker_cycle(provider: str | None = None, limit_per_feed: int = 1) -> in
                     conn.execute(
                         """INSERT OR IGNORE INTO sources(id, url, title, publisher, retrieved_at, raw_text, summary)
                            VALUES(?,?,?,?,?,?,?)""",
-                        (f"src_{stamp[:10]}_{hash(url) & 0xffffff:06x}", url, title, "RSS", stamp, context[:5000], story["snippet"])
+                        (f"src_{stamp[:10]}_{hashlib.md5(url.encode('utf-8')).hexdigest()[:6]}", url, title, "RSS", stamp, context[:5000], story["snippet"])
                     )
                     # Insert draft for human approval
                     conn.execute(

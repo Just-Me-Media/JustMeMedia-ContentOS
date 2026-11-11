@@ -10,6 +10,7 @@ from app.server import (
     db, DB_PATH, now_iso, ALLOWED_HOSTNAMES,
     string_field, ApiError
 )
+import app.server as s
 from contextlib import contextmanager
 
 
@@ -104,11 +105,41 @@ class TestDatabase(unittest.TestCase):
                 s.DB_PATH = orig
 
     def test_empty_title_rejected(self):
-        from app.server import ApiError
-        payload = {"title": "   ", "body": "Some body", "platform": "LinkedIn"}
-        with self.assertRaises(ApiError) as cm:
-            raise ApiError(400, "Title is required.")
-        self.assertIn("Title is required", str(cm.exception))
+        import tempfile
+        from pathlib import Path
+        import threading
+        from http.server import ThreadingHTTPServer
+        import app.server as s
+        orig = s.DB_PATH
+        tmp = Path(tempfile.mkdtemp())
+        s.DB_PATH = tmp / "contentos.db"
+        try:
+            s.connect_db()
+            server = ThreadingHTTPServer(("127.0.0.1", 0), s.Handler)
+            port = server.server_address[1]
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                import json
+                import urllib.error
+                import urllib.request
+                body = json.dumps({"title": "   ", "body": "Some body", "platform": "LinkedIn"}).encode("utf-8")
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/api/drafts",
+                    data=body,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                try:
+                    urllib.request.urlopen(req, timeout=5)
+                    self.fail("Expected 400 for empty title")
+                except urllib.error.HTTPError as exc:
+                    self.assertEqual(exc.code, 400)
+                    self.assertIn("Title is required", exc.read().decode("utf-8"))
+            finally:
+                server.shutdown()
+        finally:
+            s.DB_PATH = orig
 
     def test_empty_body_accepted_with_default(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -182,10 +213,17 @@ class TestPhasesAtoE(unittest.TestCase):
 
     def test_draw_things_unavailable(self):
         from app.server import generate_local_image
-        # Draw Things is offline in sandboxed test run; should gracefully return error dict
-        res = generate_local_image("a futuristic workstation")
-        self.assertFalse(res["ok"])
-        self.assertIn("Draw Things API not available", res["error"])
+        # Force Draw Things to appear offline regardless of the local environment,
+        # then assert the graceful error contract.
+        import app.server as server
+        orig = server.draw_things_available
+        server.draw_things_available = lambda: False
+        try:
+            res = generate_local_image("a futuristic workstation")
+            self.assertFalse(res["ok"])
+            self.assertIn("Draw Things API not available", res["error"])
+        finally:
+            server.draw_things_available = orig
 
     def test_build_discord_payload(self):
         from app.server import build_discord_payload
@@ -328,6 +366,146 @@ class TestPhasesAtoE(unittest.TestCase):
         for i, tw in enumerate(tweets):
             self.assertLessEqual(len(tw), 270, f"Tweet {i+1} exceeds 270 chars ({len(tw)}): {tw}")
             self.assertTrue(tw.startswith(f"{i+1}/{len(tweets)}\n\n"))
+
+
+class TestRejectedSources(unittest.TestCase):
+    """User can dismiss an article from the feed; dismissed URLs never reappear."""
+
+    @contextmanager
+    def _temp_db(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            test_dir = Path(tmp_dir)
+            import app.server as s
+            orig = s.DB_PATH
+            s.DB_PATH = test_dir / "contentos.db"
+            try:
+                yield test_dir
+            finally:
+                s.DB_PATH = orig
+
+    def test_rejected_table_exists(self):
+        with self._temp_db():
+            with db() as conn:
+                cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+                tables = [r[0] for r in cur.fetchall()]
+                self.assertIn("rejected_sources", tables)
+
+    def test_reject_and_dedupe(self):
+        from app.server import string_field
+        stamp = now_iso()
+        with self._temp_db():
+            with db() as conn:
+                conn.execute(
+                    "INSERT INTO rejected_sources(url, title, rejected_at) VALUES(?,?,?)",
+                    ("https://example.com/a", "Article A", stamp)
+                )
+                conn.execute(
+                    "INSERT OR IGNORE INTO rejected_sources(url, title, rejected_at) VALUES(?,?,?)",
+                    ("https://example.com/a", "Article A duplicate", stamp)
+                )
+                rows = conn.execute("SELECT COUNT(*) AS c FROM rejected_sources").fetchone()
+                self.assertEqual(rows["c"], 1)
+
+    def test_filter_rejected_sources(self):
+        from app.server import filter_rejected_sources
+        with self._temp_db():
+            stamp = now_iso()
+            with db() as conn:
+                conn.execute(
+                    "INSERT INTO rejected_sources(url, title, rejected_at) VALUES(?,?,?)",
+                    ("https://example.com/b", "Hidden", stamp)
+                )
+            items = [
+                {"title": "Kept", "url": "https://example.com/kept", "snippet": "stay"},
+                {"title": "Hidden", "url": "https://example.com/b", "snippet": "go"},
+                {"title": "No URL", "url": "", "snippet": "also stay"},
+            ]
+            kept = filter_rejected_sources(items)
+            self.assertEqual([i["title"] for i in kept], ["Kept", "No URL"])
+
+    def test_filter_rejected_empty_input(self):
+        from app.server import filter_rejected_sources
+        self.assertEqual(filter_rejected_sources([]), [])
+        self.assertEqual(filter_rejected_sources(None), None)
+
+
+class TestGitHubTrending(unittest.TestCase):
+    """Tests for the GitHub trending / weekly Top 10 pipeline."""
+
+    @contextmanager
+    def _temp_db(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            test_db = Path(tmp_dir) / "contentos.test.db"
+            orig = s.DB_PATH
+            s.DB_PATH = test_db
+            try:
+                yield test_db
+            finally:
+                s.DB_PATH = orig
+
+    def test_github_tables_exist(self):
+        with self._temp_db():
+            with db() as conn:
+                cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+                tables = [r[0] for r in cur.fetchall()]
+                self.assertIn("github_repos", tables)
+                self.assertIn("github_top10_issues", tables)
+
+    def test_store_and_retrieve_repos(self):
+        from app.server import store_github_repos, get_weekly_top_10
+        stamp = now_iso()[:10]
+        repos = [
+            {"full_name": "owner/repo1", "url": "https://github.com/owner/repo1", "description": "test", "stars": 100, "language": "Python"},
+            {"full_name": "owner/repo2", "url": "https://github.com/owner/repo2", "description": "test2", "stars": 50, "language": "Python"},
+        ]
+        with self._temp_db():
+            stored = store_github_repos(repos, "General")
+            self.assertEqual(stored, 2)
+            top = get_weekly_top_10("General", "LinkedIn")
+            self.assertEqual(len(top), 2)
+            self.assertEqual(top[0]["stars"], 100)
+            self.assertEqual(top[1]["stars"], 50)
+
+    def test_store_dedupes(self):
+        from app.server import store_github_repos
+        stamp = now_iso()[:10]
+        repos = [
+            {"full_name": "owner/repo1", "url": "https://github.com/owner/repo1", "description": "test", "stars": 100, "language": "Python"},
+            {"full_name": "owner/repo1", "url": "https://github.com/owner/repo1", "description": "dup", "stars": 100, "language": "Python"},
+        ]
+        with self._temp_db():
+            stored = store_github_repos(repos, "General")
+            self.assertEqual(stored, 1)
+
+    def test_generate_bundle_no_repos(self):
+        from app.server import generate_weekly_github_bundle
+        with self._temp_db():
+            bundle = generate_weekly_github_bundle("General", "LinkedIn")
+            self.assertFalse(bundle["ok"])
+            self.assertIn("No GitHub repos", bundle["error"])
+
+    def test_generate_bundle_with_repos(self):
+        from app.server import store_github_repos, generate_weekly_github_bundle
+        repos = [
+            {"full_name": "owner/repo1", "url": "https://github.com/owner/repo1", "description": "test", "stars": 100, "language": "Python"},
+            {"full_name": "owner/repo2", "url": "https://github.com/owner/repo2", "description": "test2", "stars": 50, "language": "Python"},
+        ]
+        with self._temp_db():
+            store_github_repos(repos, "General")
+            bundle = generate_weekly_github_bundle("General", "LinkedIn")
+            self.assertTrue(bundle["ok"])
+            self.assertIn("Weekly GitHub Top 10", bundle["title"])
+            self.assertIn("owner/repo1", bundle["body"])
+            self.assertIn("owner/repo2", bundle["body"])
+            self.assertEqual(bundle["platform"], "LinkedIn")
+            self.assertEqual(len(bundle["repos"]), 2)
+
+    def test_fallback_returns_list(self):
+        from app.server import fetch_github_trending
+        # Should always return a list (fallback or live scrape)
+        result = fetch_github_trending("python", "python", 7)
+        self.assertIsInstance(result, list)
+        self.assertGreater(len(result), 0)
 
 
 if __name__ == "__main__":
