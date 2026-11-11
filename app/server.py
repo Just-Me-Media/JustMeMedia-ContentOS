@@ -43,6 +43,23 @@ ALLOWED_HOSTNAMES = frozenset({"127.0.0.1", "localhost", "::1"})
 MAX_BODY_BYTES = 2_000_000
 
 
+def _configure_stdio() -> None:
+    """Make stdout/stderr tolerate non-ASCII on legacy Windows consoles.
+
+    Windows consoles often default to cp1252, which cannot encode emoji used in
+    scheduler and status messages. Without this, a ``print`` raises
+    ``UnicodeEncodeError`` and can abort notification logic before it runs.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
+_configure_stdio()
+
+
 def _load_env_fallback() -> None:
     """Auto-load API keys from shell profile or secure keys if not in environment."""
     candidates = [
@@ -1021,7 +1038,7 @@ def check_scheduled_drafts() -> list[dict]:
                 _NOTIFIED_SCHEDULED_DRAFTS.add(draft_id)
                 notified.append(r)
                 msg = f"Time to publish '{r['title'][:40]}' on {r['platform']}! (Scheduled for {r['scheduled_for']})"
-                print(f"[ContentOS Scheduler] ⏰ {msg}")
+                print(f"[ContentOS Scheduler] Time to publish: {msg}")
                 # 1. Native Mac Desktop Notification
                 if sys.platform == "darwin":
                     try:
@@ -3552,9 +3569,13 @@ def main():
     try:
         server = ThreadingHTTPServer((HOST, PORT), Handler)
     except OSError as e:
-        if e.errno == 48:
+        in_use = getattr(e, "winerror", None) == 10048 or e.errno in (48, 98, 10048)
+        if in_use:
             print(f"[ContentOS Error] Port {PORT} is already in use.")
-            print(f"Run 'kill -9 $(lsof -ti :{PORT})' or double-click ContentOS.command to clear it.")
+            if sys.platform == "win32":
+                print("Run 'Get-Process python* | Stop-Process -Force' or double-click scripts\\run_windows.ps1 to clear it.")
+            else:
+                print(f"Run 'kill -9 $(lsof -ti :{PORT})' or double-click ContentOS.command to clear it.")
             sys.exit(1)
         raise
     print("============================================================")
