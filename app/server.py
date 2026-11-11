@@ -271,7 +271,23 @@ def connect_db() -> sqlite3.Connection:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_github_fetched ON github_repos(fetched_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_github_stars ON github_repos(stars)")
 
-    # 10. Draft versions (version history for revert)
+    # 8. Platform partnerships (which platforms content is approved for posting)
+    conn.execute("""CREATE TABLE IF NOT EXISTS platforms (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        draft_id INTEGER NOT NULL,
+        platform TEXT NOT NULL,
+        provider TEXT NOT NULL DEFAULT 'x',
+        status TEXT NOT NULL DEFAULT 'approved',
+        post_id TEXT NOT NULL DEFAULT '',
+        published_at TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (draft_id) REFERENCES drafts(id) ON DELETE CASCADE
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_platforms_draft ON platforms(draft_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_platforms_status ON platforms(status)")
+
+    # 9. Draft versions (version history for revert)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS draft_versions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -360,8 +376,52 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# PHASE B: VIRAL HOOK LIBRARY + ANTI-SLOP FILTER
+def get_pending_posts(platform: str = None) -> list[dict]:
+    """Fetch approved posts ready for Hermes to publish (pending status).
+
+    Returns drafts where:
+    - status is 'Approved' or 'Pending'
+    - the draft has a platform entry in the platforms table marked 'approved'
+    - the platforms entry has not yet been published (empty post_id)
+    """
+    with db() as conn:
+        query = """
+            SELECT d.id AS draft_id, d.title, d.body, d.platform AS draft_platform,
+                   p.platform AS target_platform, p.id AS platform_id,
+                   p.post_id, p.published_at
+            FROM drafts d
+            JOIN platforms p ON p.draft_id = d.id
+            WHERE d.status IN ('Approved', 'Pending')
+              AND p.status = 'approved'
+              AND p.post_id = ''
+            ORDER BY d.id
+        """
+        if platform:
+            query += " AND p.platform = ?"
+            params = (platform,)
+        else:
+            params = ()
+        cur = conn.execute(query, params)
+        rows = cur.fetchall()
+        return [dict(r) for r in rows]
+
+
+def record_post_status(draft_id: int, platform: str, post_id: str, published_at: str = "") -> int:
+    """Record the publishing status of a post in the platforms table.
+
+    Returns the number of rows updated.
+    """
+    with db() as conn:
+        now = published_at or now_iso()
+        cur = conn.execute(
+            """UPDATE platforms
+               SET post_id = ?, published_at = ?, status = 'published', updated_at = ?
+               WHERE draft_id = ? AND platform = ? AND status = 'approved'
+               AND post_id = ''""",
+            (post_id, now, now_iso(), draft_id, platform)
+        )
+        conn.commit()
+        return cur.rowcount
 # ─────────────────────────────────────────────────────────────────────────────
 
 VIRAL_HOOK_TEMPLATES = [
