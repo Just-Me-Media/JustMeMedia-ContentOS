@@ -1951,7 +1951,7 @@ async function rejectSource(idx) {
       <a href="${it.url}" target="_blank" rel="noopener">${escapeHtml(it.title)}</a>
       <p style="margin:4px 0 6px;color:var(--muted);font-size:11px">${escapeHtml(it.snippet)}</p>
       <div style="display:flex;gap:6px;flex-wrap:wrap">
-        <button class="btn btn-small" style="background:#22543d;color:#9ae6b4;border:1px solid #2f855a;font-weight:700" onclick="oneClickCreate(${i})">✨ 1-Click Create & Stage</button>
+        <button id="btnOneClick_${i}" class="btn btn-small" style="background:#22543d;color:#9ae6b4;border:1px solid #2f855a;font-weight:700" onclick="oneClickCreate(${i})">✨ 1-Click Create & Stage</button>
         <button class="btn btn-secondary btn-small" onclick="useStory(${i})">⚡ Deep-Read & Draft</button>
         <button class="btn btn-small" style="background:transparent;border:1px solid #742a2a;color:#feb2b2" onclick="rejectSource(${i})">🚫 Reject</button>
       </div>
@@ -2100,9 +2100,9 @@ async function oneClickCreate(idx) {
   }
 
   const btn = document.getElementById(`btnOneClick_${idx}`);
-  const originalText = btn.innerHTML;
-  btn.disabled = true;
-  btn.innerHTML = '⏳ In Progress…';
+  const originalText = btn ? btn.innerHTML : '';
+
+  if (btn) { btn.disabled = true; btn.innerHTML = '⏳ In Progress…'; }
 
   openPipelineModal(item.title);
 
@@ -2130,8 +2130,7 @@ async function oneClickCreate(idx) {
     });
     const data = await res.json();
     if (data.ok) {
-      btn.innerHTML = '✅ Staged!';
-      btn.style.background = '#276749';
+      if (btn) { btn.innerHTML = '✅ Staged!'; btn.style.background = '#276749'; }
 
       // Pre-fill center editor with the primary platform draft
       document.getElementById('draftTitle').value = data.title;
@@ -2174,13 +2173,11 @@ async function oneClickCreate(idx) {
       );
     } else {
       showModalError(data.error || 'Unknown error occurred during generation.');
-      btn.innerHTML = originalText;
-      btn.disabled = false;
+      if (btn) { btn.innerHTML = originalText; btn.disabled = false; }
     }
   } catch (err) {
     showModalError('Network or server connection failed: ' + err);
-    btn.innerHTML = originalText;
-    btn.disabled = false;
+    if (btn) { btn.innerHTML = originalText; btn.disabled = false; }
   }
 }
 
