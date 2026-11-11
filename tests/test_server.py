@@ -182,10 +182,24 @@ class TestPhasesAtoE(unittest.TestCase):
 
     def test_draw_things_unavailable(self):
         from app.server import generate_local_image
-        # Draw Things is offline in sandboxed test run; should gracefully return error dict
+        # No local image engine is reachable in the test sandbox. The call must
+        # fail gracefully with a clean dict, never an exception.
         res = generate_local_image("a futuristic workstation")
         self.assertFalse(res["ok"])
-        self.assertIn("Draw Things API not available", res["error"])
+        self.assertTrue(res["error"])
+
+    def test_image_backend_capability(self):
+        from app import server
+        self.assertIn(server.IMAGE_BACKEND, ("none", "drawthings", "a1111"))
+        self.assertEqual(
+            server.LOCAL_IMAGE_ENABLED,
+            server.IMAGE_BACKEND in ("drawthings", "a1111"),
+        )
+        if server.IMAGE_BACKEND == "none":
+            self.assertFalse(server.draw_things_available())
+            res = server.generate_local_image("test")
+            self.assertFalse(res["ok"])
+            self.assertIn("disabled", res["error"].lower())
 
     def test_build_discord_payload(self):
         from app.server import build_discord_payload

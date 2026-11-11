@@ -43,6 +43,23 @@ ALLOWED_HOSTNAMES = frozenset({"127.0.0.1", "localhost", "::1"})
 MAX_BODY_BYTES = 2_000_000
 
 
+def _configure_stdio() -> None:
+    """Make stdout/stderr tolerate non-ASCII on legacy Windows consoles.
+
+    Windows consoles often default to cp1252, which cannot encode emoji used in
+    scheduler and status messages. Without this, a ``print`` raises
+    ``UnicodeEncodeError`` and can abort notification logic before it runs.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
+_configure_stdio()
+
+
 def _load_env_fallback() -> None:
     """Auto-load API keys from shell profile or secure keys if not in environment."""
     candidates = [
@@ -166,6 +183,8 @@ def connect_db() -> sqlite3.Connection:
         conn.execute("ALTER TABLE drafts ADD COLUMN views INTEGER NOT NULL DEFAULT 0")
     if "engagements" not in cols:
         conn.execute("ALTER TABLE drafts ADD COLUMN engagements INTEGER NOT NULL DEFAULT 0")
+    if "rejection_reason" not in cols:
+        conn.execute("ALTER TABLE drafts ADD COLUMN rejection_reason TEXT NOT NULL DEFAULT ''")
 
     # 2. Content items & versions (ThinkCentre relational schema)
     conn.execute("""
@@ -208,6 +227,11 @@ def connect_db() -> sqlite3.Connection:
             summary TEXT NOT NULL DEFAULT ''
         )
     """)
+
+    cur = conn.execute("PRAGMA table_info(sources)")
+    cols = [row["name"] for row in cur.fetchall()]
+    if "status" not in cols:
+        conn.execute("ALTER TABLE sources ADD COLUMN status TEXT NOT NULL DEFAULT 'new'")
 
     # 4. Claims table
     conn.execute("""
@@ -338,8 +362,21 @@ def inject_viral_hook(text: str, title: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PHASE C: LOCAL DRAW THINGS IMAGE GENERATION (AUTOMATIC1111-COMPATIBLE API)
+# PHASE C: LOCAL IMAGE GENERATION (AUTOMATIC1111-COMPATIBLE API)
 # ─────────────────────────────────────────────────────────────────────────────
+
+# Capability layer: local image generation is opt-in and platform-aware.
+# macOS defaults to Draw Things (Apple-only companion app); Windows defaults to
+# "none" and uses the GIF fallback. Set IMAGE_BACKEND=a1111 to point a Windows
+# machine at Forge/AUTOMATIC1111/SD.Next instead.
+IMAGE_BACKEND = os.environ.get(
+    "IMAGE_BACKEND",
+    "drawthings" if sys.platform == "darwin" else "none",
+).strip().lower()
+if IMAGE_BACKEND not in ("none", "drawthings", "a1111"):
+    IMAGE_BACKEND = "none"
+LOCAL_IMAGE_ENABLED = IMAGE_BACKEND in ("drawthings", "a1111")
+IMAGE_BACKEND_LABEL = {"drawthings": "Draw Things", "a1111": "Local Image API"}.get(IMAGE_BACKEND, "")
 
 DRAW_THINGS_URL = os.environ.get("DRAW_THINGS_URL", "http://127.0.0.1:7860")
 DRAW_THINGS_API_KEY = os.environ.get("DRAW_THINGS_API_KEY", "")
@@ -359,7 +396,9 @@ def _draw_things_headers(extra: dict | None = None) -> dict:
 
 
 def draw_things_available() -> bool:
-    """Check if Draw Things local API server is running."""
+    """Check if the enabled local image backend is running."""
+    if not LOCAL_IMAGE_ENABLED:
+        return False
     try:
         url = os.environ.get("DRAW_THINGS_URL", DRAW_THINGS_URL).rstrip("/")
         req = urllib.request.Request(url + "/sdapi/v1/options",
@@ -377,8 +416,10 @@ def generate_local_image(prompt: str, negative_prompt: str = "", width: int = 10
     Returns {"ok": True, "filename": "...", "b64": "..."} on success,
             {"ok": False, "error": "..."} on failure.
     """
+    if not LOCAL_IMAGE_ENABLED:
+        return {"ok": False, "error": "Local image generation is disabled on this system (IMAGE_BACKEND=none). Falling back to GIF media."}
     if not draw_things_available():
-        return {"ok": False, "error": "Draw Things API not available. Enable HTTP server in Draw Things Settings."}
+        return {"ok": False, "error": f"Local image engine ({IMAGE_BACKEND_LABEL}) is not reachable. Start the local image server."}
 
     payload = {
         "prompt": prompt,
@@ -402,7 +443,7 @@ def generate_local_image(prompt: str, negative_prompt: str = "", width: int = 10
 
         images = data.get("images", [])
         if not images:
-            return {"ok": False, "error": "Draw Things returned no images."}
+            return {"ok": False, "error": f"{IMAGE_BACKEND_LABEL or 'Local image API'} returned no images."}
 
         b64_data = images[0]
         import base64
@@ -413,7 +454,7 @@ def generate_local_image(prompt: str, negative_prompt: str = "", width: int = 10
         return {"ok": True, "filename": filename, "b64": b64_data}
 
     except urllib.error.URLError as exc:
-        return {"ok": False, "error": f"Cannot connect to Draw Things: {exc}"}
+        return {"ok": False, "error": f"Cannot connect to local image engine ({IMAGE_BACKEND_LABEL}): {exc}"}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 
@@ -1021,7 +1062,7 @@ def check_scheduled_drafts() -> list[dict]:
                 _NOTIFIED_SCHEDULED_DRAFTS.add(draft_id)
                 notified.append(r)
                 msg = f"Time to publish '{r['title'][:40]}' on {r['platform']}! (Scheduled for {r['scheduled_for']})"
-                print(f"[ContentOS Scheduler] ⏰ {msg}")
+                print(f"[ContentOS Scheduler] Time to publish: {msg}")
                 # 1. Native Mac Desktop Notification
                 if sys.platform == "darwin":
                     try:
@@ -1344,6 +1385,7 @@ textarea{min-height:160px;resize:vertical;font-family:inherit}
 .status-pill{font-size:10px;text-transform:uppercase;letter-spacing:.5px;padding:2px 7px;border-radius:10px;font-weight:700}
 .status-draft{background:#2d3748;color:#cbd5e0}
 .status-approved{background:#22543d;color:#9ae6b4}
+.status-rejected{background:#742a2a;color:#feb2b2}
 .status-published{background:#2c5282;color:#bee3f8}
 .chip{background:var(--panel-alt);border:1px solid var(--line);color:var(--muted);padding:3px 10px;border-radius:12px;font-size:11px;cursor:pointer;transition:all .15s}
 .chip:hover{border-color:#4a5568;color:var(--text)}
@@ -1481,6 +1523,10 @@ textarea{min-height:160px;resize:vertical;font-family:inherit}
     </div>
     <input id="keywordFilter" placeholder="🔍 Filter stories by keyword…" oninput="applyFilter()" style="width:100%;margin-bottom:8px">
     <div id="sourcesList" style="flex:1;overflow-y:auto;max-height:420px">Loading stories…</div>
+    <details style="margin-top:10px">
+      <summary style="cursor:pointer;font-size:11px;color:var(--muted);font-weight:600">🚫 Rejected stories (<span id="rejectedSourcesCount">0</span>) — click to restore</summary>
+      <div id="rejectedSourcesList" style="margin-top:6px;font-size:11px;color:var(--muted)">Loading…</div>
+    </details>
   </section>
 
   <!-- COLUMN 2: DRAFTING & AI ENGINE -->
@@ -1517,6 +1563,21 @@ textarea{min-height:160px;resize:vertical;font-family:inherit}
       </div>
     </div>
 
+    <!-- 1-CLICK TARGET PLATFORMS (multi-select) -->
+    <div style="background:var(--panel-alt);border:1px solid #2d3748;border-radius:6px;padding:8px 12px;margin-top:10px">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+        <label style="margin:0;font-size:12px;font-weight:700;color:#9ae6b4">✨ 1-Click produces for</label>
+        <span style="font-size:10px;color:var(--muted)">Pick any combination — one draft per platform</span>
+      </div>
+      <div id="oneClickPlatforms" style="display:flex;gap:12px;flex-wrap:wrap;margin-top:6px;font-size:12px">
+        <label style="margin:0;display:inline-flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" class="oc-platform" value="LinkedIn" checked style="accent-color:#2f855a"> LinkedIn</label>
+        <label style="margin:0;display:inline-flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" class="oc-platform" value="X" style="accent-color:#2f855a"> X / Twitter</label>
+        <label style="margin:0;display:inline-flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" class="oc-platform" value="YouTube" style="accent-color:#2f855a"> YouTube</label>
+        <label style="margin:0;display:inline-flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" class="oc-platform" value="Facebook" style="accent-color:#2f855a"> Facebook</label>
+        <label style="margin:0;display:inline-flex;align-items:center;gap:5px;cursor:pointer"><input type="checkbox" class="oc-platform" value="Instagram" style="accent-color:#2f855a"> Instagram</label>
+      </div>
+    </div>
+
     <!-- AGENT 0: DEEP RESEARCH TOGGLE -->
     <div style="background:var(--panel-alt);border:1px solid #2d3748;border-radius:6px;padding:8px 12px;margin-top:10px;display:flex;align-items:center;justify-content:space-between">
       <div>
@@ -1540,9 +1601,9 @@ textarea{min-height:160px;resize:vertical;font-family:inherit}
     <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
       <button id="btnAiDraft" class="btn btn-secondary" onclick="generateAiDraft()">⚡ Generate Post</button>
       <button id="btnAiVisual" class="btn btn-secondary" onclick="generateImagePrompt()">🎨 Suggest Image Prompt</button>
-      <button id="btnGenImage" class="btn btn-secondary" onclick="generateLocalImage()">🖼️ Draw Things (Local AI)</button>
+      <button id="btnGenImage" class="btn btn-secondary" onclick="generateLocalImage()">🖼️ __IMAGE_LABEL__ (Local AI)</button>
     </div>
-    <div id="dtStatus" style="margin-top:4px;font-size:11px;color:var(--muted)">Checking Draw Things…</div>
+    <div id="dtStatus" style="margin-top:4px;font-size:11px;color:var(--muted)">Checking __IMAGE_LABEL__…</div>
     <div id="generatedImagePreview" style="margin-top:8px;display:none">
       <img id="generatedImg" style="width:100%;border-radius:6px;border:1px solid var(--line)" alt="Generated image">
       <button class="btn btn-secondary btn-small" style="margin-top:4px" onclick="attachGeneratedImage()">📎 Attach to Draft</button>
@@ -1617,8 +1678,14 @@ textarea{min-height:160px;resize:vertical;font-family:inherit}
     
     <input type="hidden" id="draftSourceUrl">
     <input type="hidden" id="draftMediaUrl">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px">
-      <button class="btn" onclick="saveDraft()">💾 Save Draft</button>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px;gap:8px;flex-wrap:wrap">
+      <div style="display:flex;align-items:center;gap:8px">
+        <button class="btn" id="btnSaveDraft" onclick="saveDraft()">💾 Save Draft</button>
+        <span id="editingBadge" style="display:none;font-size:11px;color:#9ae6b4;background:#14291e;border:1px solid #22543d;padding:3px 8px;border-radius:10px">
+          ✏️ Editing draft #<span id="editingDraftId"></span>
+          <button class="btn btn-small btn-secondary" style="margin-left:6px;padding:1px 6px" onclick="cancelDraftEdit()">New draft</button>
+        </span>
+      </div>
       <span id="saveToast" class="toast"></span>
     </div>
   </section>
@@ -1634,9 +1701,10 @@ textarea{min-height:160px;resize:vertical;font-family:inherit}
       <button class="btn btn-secondary btn-small" onclick="toggleWebhookSettings()">⚙️ Webhooks</button>
     </div>
 
-    <!-- QUEUE TABS: ACTIVE VS PUBLISHED ARCHIVE -->
-    <div style="display:flex;gap:6px;margin-bottom:10px">
+    <!-- QUEUE TABS: ACTIVE VS REJECTED VS PUBLISHED ARCHIVE -->
+    <div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap">
       <button id="tabActive" class="chip chip-active" onclick="switchQueueTab('active')">⚡ Active Queue (<span id="activeCount">0</span>)</button>
+      <button id="tabRejected" class="chip" onclick="switchQueueTab('rejected')">🚫 Rejected (<span id="rejectedCount">0</span>)</button>
       <button id="tabArchive" class="chip" onclick="switchQueueTab('published')">📊 Published Archive (<span id="archiveCount">0</span>)</button>
     </div>
 
@@ -1685,7 +1753,7 @@ textarea{min-height:160px;resize:vertical;font-family:inherit}
       
       <div id="mStep1" class="modal-step"><span>📖</span> <span>[1/4] Scraping deep article text & facts…</span></div>
       <div id="mStep2" class="modal-step"><span>✍️</span> <span>[2/4] Running 4-Agent Roundtable (Hook & Anti-Slop)…</span></div>
-      <div id="mStep3" class="modal-step"><span>🎨</span> <span>[3/4] Painting visual art with Draw Things on Mac GPU…</span></div>
+      <div id="mStep3" class="modal-step"><span>🎨</span> <span>[3/4] __IMAGE_STEP3__</span></div>
       <div id="mStep4" class="modal-step"><span>📅</span> <span>[4/4] Auto-scheduling optimal peak posting slot…</span></div>
       
       <p style="font-size:11px;color:#718096;text-align:center;margin-top:14px">Feel free to step away and make tea ☕ — your Mac chime & phone will alert you when complete.</p>
@@ -1694,23 +1762,23 @@ textarea{min-height:160px;resize:vertical;font-family:inherit}
     <div id="modalSuccessView" style="display:none">
       <div style="text-align:center;margin-bottom:16px">
         <div style="font-size:36px;margin-bottom:4px">🎉</div>
-        <h3 style="margin:0;font-size:18px;color:#9ae6b4">Your Post & Artwork Are Ready!</h3>
-        <p style="font-size:12px;color:#a0aec0;margin:4px 0 0">Staged & saved to your local database.</p>
+        <h3 style="margin:0;font-size:18px;color:#9ae6b4">Drafts Staged for Review</h3>
+        <p style="font-size:12px;color:#a0aec0;margin:4px 0 0">Nothing is published yet — approval is required.</p>
       </div>
 
       <div style="background:#1a202c;border:1px solid #2d3748;border-radius:8px;padding:12px;margin-bottom:16px">
-        <div style="font-size:11px;color:#9ae6b4;text-transform:uppercase;letter-spacing:1px;font-weight:700">👉 Step 1 of 2: Launch Post</div>
-        <div style="font-size:13px;color:#e2e8f0;margin:6px 0 12px;line-height:1.4" id="modalPostPreview"></div>
+        <div style="font-size:11px;color:#9ae6b4;text-transform:uppercase;letter-spacing:1px;font-weight:700">👉 Next step: review &amp; approve</div>
+        <div id="modalStagedList" style="margin:8px 0 12px;display:flex;flex-direction:column;gap:6px"></div>
         <div id="modalActionButtons"></div>
         <div style="font-size:11px;color:#a0aec0;margin-top:8px">
-          💡 <strong>What happens when you click:</strong> Copies post to clipboard & opens your browser composer. Just press <code>Cmd + V</code> to paste!
+          💡 Launch buttons stay locked until you approve a draft in the Publishing Hub. This keeps a human in the loop.
         </div>
       </div>
 
       <div style="background:#14291e;border:1px solid #22543d;border-radius:8px;padding:10px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center">
         <div>
-          <div style="font-size:11px;color:#9ae6b4;font-weight:700">👉 Step 2 of 2: Attach Image</div>
-          <div style="font-size:11px;color:#cbd5e0;margin-top:2px">Artwork is saved in your <code>ContentOS Media</code> Desktop folder.</div>
+          <div style="font-size:11px;color:#9ae6b4;font-weight:700">🖼️ Attached media</div>
+          <div style="font-size:11px;color:#cbd5e0;margin-top:2px" id="modalMediaNote">Media is attached to every staged draft.</div>
         </div>
         <button class="btn btn-small" style="background:#22543d;color:#9ae6b4;border:1px solid #2f855a;white-space:nowrap" onclick="openMediaFinder()">📂 Open Folder</button>
       </div>
@@ -1822,12 +1890,21 @@ async function fetchFeed(url) {
       return;
     }
     window._sources = items;
+    // Mark stories already used (a draft exists for that source URL)
+    try {
+      const dr = await fetch('/api/drafts');
+      const drafts = await dr.json();
+      window._usedUrls = new Set((drafts || []).map(d => d.source_url).filter(Boolean));
+    } catch (e) { window._usedUrls = new Set(); }
     // Re-apply any active keyword/topic filter after feed refresh
     setTimeout(applyFilter, 50);
-    listEl.innerHTML = items.map((item, idx) => `
-      <div class="source-item">
+    listEl.innerHTML = items.map((item, idx) => {
+      const used = window._usedUrls && window._usedUrls.has(item.url);
+      return `
+      <div class="source-item" ${used ? 'style="opacity:.7;border-left:3px solid #2b6cb0"' : ''}>
         <a href="${item.url}" target="_blank" rel="noopener">${escapeHtml(item.title)}</a>
         <p style="margin:4px 0 6px;color:var(--muted);font-size:11px">${escapeHtml(item.snippet)}</p>
+        ${used ? '<div style="font-size:10px;color:#90cdf4;font-weight:700;margin-bottom:4px">✓ Already staged as a draft</div>' : ''}
         <div style="display:flex;gap:6px;flex-wrap:wrap">
           <button id="btnOneClick_${idx}" class="btn btn-small" style="background:#22543d;color:#9ae6b4;border:1px solid #2f855a;font-weight:700" onclick="oneClickCreate(${idx})">
             ✨ 1-Click Create & Stage
@@ -1835,16 +1912,82 @@ async function fetchFeed(url) {
           <button class="btn btn-secondary btn-small" onclick="useStory(${idx})">
             ⚡ Deep-Read & Draft
           </button>
+          <button class="btn btn-small" style="background:transparent;border:1px solid #742a2a;color:#feb2b2" onclick="rejectSource(${idx})" title="Hide this story and never show it again">
+            🚫 Reject
+          </button>
         </div>
       </div>
-    `).join('');
+    `;
+    }).join('');
   } catch (err) {
     listEl.innerHTML = '<div style="color:var(--danger);padding:10px 0">Failed to fetch RSS feed.</div>';
   }
 }
 
 
-// ── PIPELINE GUIDANCE MODAL CONTROLS ──────────────────────────────────────────
+async function rejectSource(idx) {
+  const item = (window._sources || [])[idx];
+  if (!item) return;
+  if (!confirm('Reject this story? It will be hidden and never shown again (you can restore it in the Rejected list).')) return;
+  try {
+    await fetch('/api/sources/reject', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({url: item.url, title: item.title})
+    });
+  } catch (e) {}
+  // Remove from the current list immediately
+  window._sources.splice(idx, 1);
+  // Re-render
+  const listEl = document.getElementById('sourcesList');
+  if (!window._sources.length) {
+    listEl.innerHTML = '<div style="color:var(--muted);padding:10px 0">No stories left. Fetch a feed to load more.</div>';
+    return;
+  }
+  // Rebuild by re-running fetchFeed's render path is heavy; just reload the feed's cached list via applyFilter
+  // Simpler: re-render inline
+  listEl.innerHTML = window._sources.map((it, i) => `
+    <div class="source-item">
+      <a href="${it.url}" target="_blank" rel="noopener">${escapeHtml(it.title)}</a>
+      <p style="margin:4px 0 6px;color:var(--muted);font-size:11px">${escapeHtml(it.snippet)}</p>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <button class="btn btn-small" style="background:#22543d;color:#9ae6b4;border:1px solid #2f855a;font-weight:700" onclick="oneClickCreate(${i})">✨ 1-Click Create & Stage</button>
+        <button class="btn btn-secondary btn-small" onclick="useStory(${i})">⚡ Deep-Read & Draft</button>
+        <button class="btn btn-small" style="background:transparent;border:1px solid #742a2a;color:#feb2b2" onclick="rejectSource(${i})">🚫 Reject</button>
+      </div>
+    </div>
+  `).join('');
+  loadRejectedSources();
+}
+async function loadRejectedSources() {
+  try {
+    const res = await fetch('/api/sources/rejected');
+    const items = await res.json();
+    const el = document.getElementById('rejectedSourcesList');
+    const cnt = document.getElementById('rejectedSourcesCount');
+    if (cnt) cnt.textContent = items.length;
+    if (!items.length) {
+      el.innerHTML = '<div style="color:var(--muted)">No rejected stories.</div>';
+      return;
+    }
+    el.innerHTML = items.map(s => `
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;padding:4px 0;border-bottom:1px solid #1a2430">
+        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(s.title)}">${escapeHtml(s.title)}</span>
+        <button class="btn btn-small btn-secondary" onclick="restoreRejectedSource('${escapeHtml(s.url)}')">↩️ Restore</button>
+      </div>
+    `).join('');
+  } catch (e) {}
+}
+
+async function restoreRejectedSource(url) {
+  await fetch('/api/sources/restore', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({url})
+  });
+  loadRejectedSources();
+  fetchFeed(document.getElementById('rssPreset').value);
+}
 function openPipelineModal(title) {
   document.getElementById('modalLoadingView').style.display = 'block';
   document.getElementById('modalSuccessView').style.display = 'none';
@@ -1877,19 +2020,41 @@ function showModalSuccess(data) {
   document.getElementById('modalSuccessView').style.display = 'block';
   document.getElementById('modalErrorView').style.display = 'none';
 
-  const preview = (data.body || '').slice(0, 160) + '…';
-  document.getElementById('modalPostPreview').textContent = preview;
+  const staged = Array.isArray(data.drafts) && data.drafts.length
+    ? data.drafts
+    : [{id: data.id, platform: data.platform, body: data.body}];
+
+  const listEl = document.getElementById('modalStagedList');
+  listEl.innerHTML = staged.map(d => `
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;background:#0f1620;border:1px solid #2d3748;border-radius:6px;padding:7px 10px">
+      <div style="min-width:0">
+        <div style="font-size:12px;font-weight:700;color:#e2e8f0">${escapeHtml(d.platform)}</div>
+        <div style="font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml((d.body || '').slice(0, 70))}…</div>
+      </div>
+      <span class="status-pill status-draft" style="flex-shrink:0">DRAFT</span>
+    </div>
+  `).join('');
+
+  document.getElementById('modalMediaNote').textContent = data.media_url
+    ? 'Media attached to every staged draft.'
+    : 'No local media backend — text-only drafts (add a GIF in the Studio if you want).';
 
   const btnContainer = document.getElementById('modalActionButtons');
-  const launchUrl = data.platform === 'X' ? 'https://x.com/compose/post' : 'https://www.linkedin.com/feed/';
-  const launchLabel = data.platform === 'X' ? '🚀 Copy Post & Open X Composer ↗' : '🚀 Copy Post & Open LinkedIn ↗';
-  const launchColor = data.platform === 'X' ? '#1da1f2' : '#0077b5';
-
   btnContainer.innerHTML = `
-    <button class="btn" style="width:100%;background:${launchColor};color:#fff;font-weight:700;padding:12px;font-size:14px" onclick="copyAndLaunchFromModal(${data.id}, '${launchUrl}')">
-      ${launchLabel}
+    <button class="btn" style="width:100%;background:#2b6cb0;color:#fff;font-weight:700;padding:12px;font-size:14px" onclick="focusQueueFromModal()">
+      👀 Review &amp; Approve in Publishing Hub
     </button>
   `;
+}
+
+function focusQueueFromModal() {
+  closePipelineModal();
+  const hub = document.getElementById('draftsQueue');
+  if (hub) {
+    hub.scrollIntoView({behavior: 'smooth', block: 'center'});
+    hub.style.outline = '2px solid #2b6cb0';
+    setTimeout(() => { hub.style.outline = ''; }, 1800);
+  }
 }
 
 function showModalError(errMessage) {
@@ -1900,8 +2065,8 @@ function showModalError(errMessage) {
   let advice = 'Click Dismiss and try another story or switch your AI Provider in Column 2.';
   if (errMessage.includes('Rate limit') || errMessage.includes('429')) {
     advice = 'Groq Cloud free tier requests were paced. Wait ~10 seconds and click again.';
-  } else if (errMessage.includes('Draw Things')) {
-    advice = 'Draw Things is rendering or connecting. Check Draw Things Settings -> API Server.';
+  } else if (errMessage.includes('image') || errMessage.includes('Image')) {
+    advice = 'The local image engine is not reachable. Media falls back to a GIF.';
   }
   document.getElementById('modalErrorAdvice').textContent = advice;
 }
@@ -1927,6 +2092,13 @@ async function oneClickCreate(idx) {
   const item = (window._sources || [])[idx];
   if (!item) return;
 
+  // Multi-platform targets chosen in the Studio panel.
+  let platforms = Array.from(document.querySelectorAll('.oc-platform:checked')).map(el => el.value);
+  if (!platforms.length) {
+    alert('Choose at least one platform under “1-Click produces for” first.');
+    return;
+  }
+
   const btn = document.getElementById(`btnOneClick_${idx}`);
   const originalText = btn.innerHTML;
   btn.disabled = true;
@@ -1935,8 +2107,8 @@ async function oneClickCreate(idx) {
   openPipelineModal(item.title);
 
   const provider = document.getElementById('aiProvider').value;
-  const platform = document.getElementById('draftPlatform').value;
   const tone = document.getElementById('draftTone').value;
+  const deep = document.getElementById('deepResearchToggle') ? document.getElementById('deepResearchToggle').checked : true;
 
   try {
     setTimeout(() => { if (btn.disabled) updateModalStep(2); }, 1200);
@@ -1950,9 +2122,10 @@ async function oneClickCreate(idx) {
         title: item.title,
         url: item.url,
         snippet: item.snippet,
-        platform: platform,
+        platforms: platforms,
         tone: tone,
-        provider: provider
+        provider: provider,
+        deep_research: deep
       })
     });
     const data = await res.json();
@@ -1960,7 +2133,7 @@ async function oneClickCreate(idx) {
       btn.innerHTML = '✅ Staged!';
       btn.style.background = '#276749';
 
-      // Pre-fill center editor immediately
+      // Pre-fill center editor with the primary platform draft
       document.getElementById('draftTitle').value = data.title;
       document.getElementById('draftBody').value = data.body;
       document.getElementById('draftPlatform').value = data.platform;
@@ -1973,19 +2146,30 @@ async function oneClickCreate(idx) {
       }
       updateCharCount();
 
+      // The primary draft already exists, so Save should update instead of duplicating.
+      setEditingDraft(data.id);
+
+      // Mark this story as used so it shows a badge on refresh
+      if (item.url) {
+        try { await fetch('/api/sources/use', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({url: item.url, title: item.title})}); } catch(e) {}
+        if (!window._usedUrls) window._usedUrls = new Set();
+        window._usedUrls.add(item.url);
+      }
+
       // Refresh drafts queue
       loadDrafts();
 
       // Gentle completion chime
       playChime();
 
-      // Show rich modal success with 1-click action
+      // Show rich modal success (staged drafts, no auto-publish)
       showModalSuccess(data);
 
       // Phone push notification
+      const count = (data.drafts || []).length;
       sendPhonePush(
-        '✨ Post Ready: ' + data.title.slice(0,50),
-        'Your ' + data.platform + ' draft is staged for ' + (data.scheduled_for || 'review') + '. Open ContentOS to review and launch.',
+        '✨ ' + count + ' draft' + (count === 1 ? '' : 's') + ' ready: ' + data.title.slice(0,40),
+        'Staged for ' + (data.scheduled_for || 'review') + '. Open ContentOS to review, approve and launch.',
         'high'
       );
     } else {
@@ -2074,9 +2258,25 @@ function cleanForX(str) {
   return (lastSpace > 100 ? cut.slice(0, lastSpace) : cut) + '…';
 }
 
+const PLATFORM_LAUNCH = {
+  LinkedIn: {url: 'https://www.linkedin.com/feed/', label: 'LinkedIn', color: '#0077b5'},
+  X: {url: 'https://x.com/compose/post', label: 'X', color: '#1da1f2'},
+  Facebook: {url: 'https://www.facebook.com/', label: 'Facebook', color: '#1877f2'},
+  Instagram: {url: 'https://www.instagram.com/', label: 'Instagram', color: '#c13584'},
+  YouTube: {url: 'https://studio.youtube.com/', label: 'YouTube Studio', color: '#cc0000'},
+  General: {url: 'https://www.linkedin.com/feed/', label: 'LinkedIn', color: '#0077b5'}
+};
+function launchMeta(platform) {
+  return PLATFORM_LAUNCH[platform] || {url: 'https://www.linkedin.com/feed/', label: platform || 'Social', color: '#4a5568'};
+}
+
 function copyAndLaunch(id, url) {
   const d = (window._drafts || {})[id];
   if (!d) return;
+  if (d.status !== 'Approved') {
+    alert('This draft is not approved yet. Click ✅ Approve first — ContentOS never publishes without human approval.');
+    return;
+  }
   let text = d.body;
   if (d.platform === 'LinkedIn') {
     text = cleanMarkdownForSocial(text);
@@ -2091,6 +2291,7 @@ function copyAndLaunch(id, url) {
 async function useStory(idx) {
   const item = (window._sources || [])[idx];
   if (!item) return;
+  cancelDraftEdit(true); // loading a story starts a new draft
   document.getElementById('draftTitle').value = item.title;
   document.getElementById('draftSourceUrl').value = item.url;
   
@@ -2112,6 +2313,13 @@ async function useStory(idx) {
   
   updateCharCount();
   document.getElementById('draftTitle').focus();
+
+  // Mark this story as used
+  if (item.url) {
+    try { fetch('/api/sources/use', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({url: item.url, title: item.title})}); } catch(e) {}
+    if (!window._usedUrls) window._usedUrls = new Set();
+    window._usedUrls.add(item.url);
+  }
 }
 
 function updateCharCount() {
@@ -2341,6 +2549,8 @@ async function runAutopilot() {
   }
 }
 
+let _editingDraftId = null;
+
 async function saveDraft() {
   const title = document.getElementById('draftTitle').value.trim();
   const body = document.getElementById('draftBody').value;
@@ -2354,7 +2564,8 @@ async function saveDraft() {
     return;
   }
 
-  const res = await fetch('/api/drafts', {
+  const editing = _editingDraftId;
+  const res = await fetch(editing ? `/api/drafts/${editing}/update` : '/api/drafts', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({title, body, platform, image_prompt, source_url, media_url})
@@ -2362,19 +2573,54 @@ async function saveDraft() {
   const data = await res.json();
   const toast = document.getElementById('saveToast');
   if (res.ok) {
-    toast.textContent = 'Saved to local database!';
+    if (editing) {
+      toast.textContent = `Draft #${editing} updated — no duplicate created.`;
+      cancelDraftEdit(true);
+    } else {
+      toast.textContent = 'Saved to local database!';
+      if (data.id) setEditingDraft(data.id);
+    }
     setTimeout(() => { toast.textContent = ''; }, 3000);
     loadDrafts();
   } else {
-    toast.textContent = 'Error: ' + data.error;
+    toast.textContent = 'Error: ' + (data.error || 'Save failed');
+  }
+}
+
+function setEditingDraft(id) {
+  _editingDraftId = id;
+  const badge = document.getElementById('editingBadge');
+  const idEl = document.getElementById('editingDraftId');
+  const btn = document.getElementById('btnSaveDraft');
+  if (badge) badge.style.display = 'inline-flex';
+  if (idEl) idEl.textContent = id;
+  if (btn) btn.textContent = '💾 Update Draft';
+}
+
+function cancelDraftEdit(silent) {
+  _editingDraftId = null;
+  const badge = document.getElementById('editingBadge');
+  const btn = document.getElementById('btnSaveDraft');
+  if (badge) badge.style.display = 'none';
+  if (btn) btn.textContent = '💾 Save Draft';
+  if (!silent) {
+    document.getElementById('draftTitle').value = '';
+    document.getElementById('draftBody').value = '';
+    document.getElementById('draftImagePrompt').value = '';
+    document.getElementById('draftSourceUrl').value = '';
+    document.getElementById('draftMediaUrl').value = '';
+    document.getElementById('attachedMediaPreview').style.display = 'none';
+    updateCharCount();
   }
 }
 
 function switchQueueTab(tab) {
   window._queueTab = tab;
   const tAct = document.getElementById('tabActive');
+  const tRej = document.getElementById('tabRejected');
   const tArc = document.getElementById('tabArchive');
   if (tAct) tAct.classList.toggle('chip-active', tab === 'active');
+  if (tRej) tRej.classList.toggle('chip-active', tab === 'rejected');
   if (tArc) tArc.classList.toggle('chip-active', tab === 'published');
   loadDrafts();
 }
@@ -2408,21 +2654,54 @@ async function loadDrafts() {
   window._drafts = {};
   drafts.forEach(d => { window._drafts[d.id] = d; });
 
-  const activeDrafts = drafts.filter(d => d.status !== 'Published');
+  const activeDrafts = drafts.filter(d => d.status !== 'Published' && d.status !== 'Rejected');
+  const rejectedDrafts = drafts.filter(d => d.status === 'Rejected');
   const publishedDrafts = drafts.filter(d => d.status === 'Published');
   const actCountEl = document.getElementById('activeCount');
+  const rejCountEl = document.getElementById('rejectedCount');
   const arcCountEl = document.getElementById('archiveCount');
   if (actCountEl) actCountEl.textContent = activeDrafts.length;
+  if (rejCountEl) rejCountEl.textContent = rejectedDrafts.length;
   if (arcCountEl) arcCountEl.textContent = publishedDrafts.length;
 
   const tab = window._queueTab || 'active';
-  const displayList = tab === 'published' ? publishedDrafts : activeDrafts;
+  const displayList = tab === 'published' ? publishedDrafts
+    : tab === 'rejected' ? rejectedDrafts
+    : activeDrafts;
   document.getElementById('queueCount').textContent = `${displayList.length} items`;
 
   if (!displayList.length) {
     queueEl.innerHTML = tab === 'published'
       ? '<div style="color:var(--muted);padding:16px 0;text-align:center">No published stories in archive yet. Once you publish stories from the Active Queue, they will be tracked here!</div>'
-      : '<div style="color:var(--muted);padding:16px 0;text-align:center">No active drafts in queue. Pick a story from Column 1 or write one on the left.</div>';
+      : tab === 'rejected'
+        ? '<div style="color:var(--muted);padding:16px 0;text-align:center">No rejected drafts. Rejected ideas stay here (with their reason) so you can restore or delete them.</div>'
+        : '<div style="color:var(--muted);padding:16px 0;text-align:center">No active drafts in queue. Pick a story from Column 1 or write one on the left.</div>';
+    return;
+  }
+
+  if (tab === 'rejected') {
+    queueEl.innerHTML = displayList.map(d => `
+      <div class="item-card" style="border-left: 3px solid #742a2a;background:#180f12;opacity:.95">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
+          <h3 style="margin:0">${escapeHtml(d.title)}</h3>
+          <span class="status-pill status-rejected">REJECTED</span>
+        </div>
+        <div class="item-meta" style="margin-top:6px">
+          <span>${escapeHtml(d.platform)}</span> · <span>${escapeHtml(d.updated_at.slice(0,10))}</span>
+        </div>
+        ${d.rejection_reason ? `
+          <div style="background:#2a1518;border:1px solid #742a2a;border-radius:6px;padding:7px 10px;margin:8px 0;font-size:11px;color:#feb2b2">
+            <strong>Reason:</strong> ${escapeHtml(d.rejection_reason)}
+          </div>
+        ` : ''}
+        <p style="white-space:pre-wrap;line-height:1.4;max-height:140px;overflow-y:auto;background:#090d12;padding:8px;border-radius:4px;font-size:12px;margin:8px 0;border:1px solid #1a2430">${escapeHtml(d.body)}</p>
+        <div style="display:flex;gap:6px;margin-top:8px">
+          <button class="btn btn-small" style="background:#22543d;color:#9ae6b4;border:1px solid #2f855a;font-weight:700" onclick="restoreDraft(${d.id})">↩️ Restore to Queue</button>
+          <button class="btn btn-secondary btn-small" onclick="copyDraftText(${d.id})">📋 Copy Text</button>
+          <button class="btn btn-danger btn-small" onclick="deleteDraft(${d.id})">Delete Permanently</button>
+        </div>
+      </div>
+    `).join('');
     return;
   }
 
@@ -2475,17 +2754,20 @@ async function loadDrafts() {
   // Active Drafts Queue
   queueEl.innerHTML = displayList.map(d => {
     const statusClass = d.status === 'Approved' ? 'status-approved' : 'status-draft';
+    const lm = launchMeta(d.platform);
+    const isApproved = d.status === 'Approved';
     return `
-      <div class="item-card" style="border-left: 3px solid #38a169">
-        <!-- TOP 1-CLICK LAUNCH BANNER -->
-        <div style="background:#142233;border:1px solid #2b6cb0;border-radius:6px;padding:8px 10px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;gap:8px">
+      <div class="item-card" style="border-left: 3px solid ${isApproved ? '#38a169' : '#4a5568'}">
+        <!-- TOP 1-CLICK LAUNCH BANNER (approval-gated) -->
+        <div style="background:#142233;border:1px solid ${isApproved ? '#2b6cb0' : '#2d3748'};border-radius:6px;padding:8px 10px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;gap:8px">
           <div>
-            <div style="font-size:10px;color:#90cdf4;font-weight:700;letter-spacing:0.5px">⚡ READY TO PUBLISH</div>
-            <div style="font-size:11px;color:#e2e8f0;margin-top:2px">Copies text & opens ${escapeHtml(d.platform)} in browser</div>
+            <div style="font-size:10px;color:${isApproved ? '#90cdf4' : '#a0aec0'};font-weight:700;letter-spacing:0.5px">${isApproved ? '⚡ APPROVED — READY TO PUBLISH' : '🔒 APPROVAL REQUIRED'}</div>
+            <div style="font-size:11px;color:#e2e8f0;margin-top:2px">${isApproved ? `Copies text & opens ${escapeHtml(lm.label)} in browser` : 'Approve this draft to unlock 1-click launch'}</div>
           </div>
           <div>
-            ${d.platform === 'X' ? `<button class="btn btn-small" style="background:#1da1f2;color:#fff;font-weight:700;padding:6px 12px;font-size:12px" onclick="copyAndLaunch(${d.id}, 'https://x.com/compose/post')">🚀 Launch to X ↗</button>` : ''}
-            ${d.platform === 'LinkedIn' ? `<button class="btn btn-small" style="background:#0077b5;color:#fff;font-weight:700;padding:6px 12px;font-size:12px" onclick="copyAndLaunch(${d.id}, 'https://www.linkedin.com/feed/')">🚀 Launch to LinkedIn ↗</button>` : ''}
+            ${isApproved
+              ? `<button class="btn btn-small" style="background:${lm.color};color:#fff;font-weight:700;padding:6px 12px;font-size:12px" onclick="copyAndLaunch(${d.id}, '${lm.url}')">🚀 Launch to ${escapeHtml(lm.label)} ↗</button>`
+              : `<button class="btn btn-small" style="background:#1a202c;color:#718096;border:1px solid #2d3748;font-weight:700;padding:6px 12px;font-size:12px;cursor:not-allowed" disabled>🔒 Approve to launch</button>`}
           </div>
         </div>
 
@@ -2546,6 +2828,7 @@ async function loadDrafts() {
           <button class="btn btn-secondary btn-small" onclick="downloadMarkdown(${d.id})">📥 Export .MD</button>
           ${d.status !== 'Approved' ? `
             <button class="btn btn-approve btn-small" onclick="approveDraft(${d.id})">✅ Approve</button>
+            <button class="btn btn-small" style="background:transparent;border:1px solid #742a2a;color:#feb2b2" onclick="rejectDraft(${d.id})">🚫 Reject</button>
           ` : `
             <button class="btn btn-secondary btn-small" style="color:#bee3f8" onclick="markPublished(${d.id})">Mark Published</button>
           `}
@@ -2618,6 +2901,30 @@ async function approveDraft(id) {
   loadDrafts();
 }
 
+async function rejectDraft(id) {
+  const reason = prompt(
+    'Why are you rejecting this draft? (optional)\n\n' +
+    'Heads up: rejecting keeps the draft in the Rejected tab so you can restore it later. It is not deleted.',
+    ''
+  );
+  if (reason === null) return; // user cancelled
+  await fetch(`/api/drafts/${id}/reject`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({reason: reason})
+  });
+  loadDrafts();
+}
+
+async function restoreDraft(id) {
+  await fetch(`/api/drafts/${id}/restore`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: '{}'
+  });
+  loadDrafts();
+}
+
 async function markPublished(id) {
   await fetch(`/api/drafts/${id}/publish`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'});
   loadDrafts();
@@ -2653,7 +2960,10 @@ function editDraftInStudio(id) {
     document.getElementById('attachedMediaUrl').textContent = d.media_url;
     document.getElementById('attachedMediaPreview').style.display = 'block';
   }
+  setEditingDraft(id);
   updateCharCount();
+  const titleEl = document.getElementById('draftTitle');
+  if (titleEl && titleEl.scrollIntoView) titleEl.scrollIntoView({behavior: 'smooth', block: 'center'});
   document.getElementById('draftBody').focus();
 }
 
@@ -2684,21 +2994,22 @@ async function generateOmniBundle() {
   const tone = document.getElementById('draftTone').value;
   if (!title && !context) { alert('Enter a title or article text first.'); return; }
   const btn = document.getElementById('btnOmni');
-  btn.disabled = true; btn.textContent = '⏳ Repurposing All 3…';
+  btn.disabled = true; btn.textContent = '⏳ Repurposing All 4…';
   try {
     const liRes = await fetch('/api/generate', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({task:'draft_post', title, context, platform:'LinkedIn', tone, provider})});
     const liData = await liRes.json();
-    btn.textContent = '⏳ Formatted LinkedIn (1/3)…';
+    btn.textContent = '⏳ Formatted LinkedIn (1/4)…';
 
     const xRes = await fetch('/api/generate', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({task:'draft_post', title, context, platform:'X', tone, provider})});
     const xData = await xRes.json();
-    btn.textContent = '⏳ Formatted X Thread (2/3)…';
+    btn.textContent = '⏳ Formatted X Thread (2/4)…';
 
     const ytRes = await fetch('/api/generate', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({task:'draft_post', title, context, platform:'YouTube', tone, provider})});
     const ytData = await ytRes.json();
+    btn.textContent = '⏳ Formatted YouTube Hub (3/4)…';
 
     const fbRes = await fetch('/api/generate', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({task:'draft_post', title, context, platform:'Facebook', tone, provider})});
@@ -2734,7 +3045,9 @@ function loadOmniToDraft(tab) {
   const text = _omniBundle[tab];
   if (!text) return;
   document.getElementById('draftBody').value = text;
-  document.getElementById('draftPlatform').value = tab === 'x' ? 'X' : (tab === 'youtube' ? 'YouTube' : 'LinkedIn');
+  const map = {linkedin: 'LinkedIn', x: 'X', youtube: 'YouTube', facebook: 'Facebook'};
+  document.getElementById('draftPlatform').value = map[tab] || 'General';
+  cancelDraftEdit(true); // loading a variant starts a new draft
   updateCharCount();
 }
 
@@ -2748,7 +3061,7 @@ async function saveOmniBundle() {
         image_prompt: _omniBundle.image_prompt || '', source_url: '', media_url: ''})
     });
   }
-  alert('✅ Saved 3 platform drafts to queue!');
+  alert('✅ Saved 4 platform drafts to queue!');
   loadDrafts();
 }
 
@@ -2756,15 +3069,26 @@ async function saveOmniBundle() {
 // PHASE C: DRAW THINGS LOCAL IMAGE GENERATION
 // ─────────────────────────────────────────────────────────────────────────────
 let _generatedImageFilename = '';
+let _imageBackendLabel = 'Local Image';
 async function checkDrawThingsStatus() {
+  const el = document.getElementById('dtStatus');
+  const btn = document.getElementById('btnGenImage');
   try {
     const res = await fetch('/api/draw-things-status');
     const data = await res.json();
-    const el = document.getElementById('dtStatus');
+    if (!data.supported) {
+      // Capability layer: this host has no local image backend (e.g. Windows).
+      // Hide the feature entirely; the pipeline uses the GIF fallback instead.
+      if (btn) btn.style.display = 'none';
+      if (el) el.style.display = 'none';
+      return;
+    }
+    _imageBackendLabel = data.label || 'Local Image';
+    if (btn) btn.textContent = '🖼️ ' + _imageBackendLabel + ' (Local AI)';
     if (data.available) {
-      el.innerHTML = '<span class="draw-things-status dt-online">🟢 Draw Things Online (127.0.0.1:7860)</span>';
+      el.innerHTML = '<span class="draw-things-status dt-online">🟢 ' + _imageBackendLabel + ' Online</span>';
     } else {
-      el.innerHTML = '<span class="draw-things-status" style="background:#1b251f;border:1px solid #28382e;color:var(--muted);font-size:11px;padding:3px 8px;border-radius:4px;display:inline-block">⚪ Draw Things Offline (Optional Local AI Art — enable API in Draw Things Settings)</span>';
+      el.innerHTML = '<span class="draw-things-status" style="background:#1b251f;border:1px solid #28382e;color:var(--muted);font-size:11px;padding:3px 8px;border-radius:4px;display:inline-block">⚪ ' + _imageBackendLabel + ' Offline (start the local image server)</span>';
     }
   } catch(e) {}
 }
@@ -2786,10 +3110,10 @@ async function generateLocalImage() {
       document.getElementById('generatedImg').src = `/api/media/${data.filename}`;
       document.getElementById('generatedImagePreview').style.display = 'block';
     } else {
-      alert('Draw Things image generation: ' + data.error);
+      alert(_imageBackendLabel + ': ' + data.error);
     }
-  } catch(e) { alert('Failed to connect to Draw Things API: ' + e); }
-  finally { btn.disabled = false; btn.textContent = '🖼️ Draw Things (Local AI)'; }
+  } catch(e) { alert('Failed to reach the local image API: ' + e); }
+  finally { btn.disabled = false; btn.textContent = '🖼️ ' + _imageBackendLabel + ' (Local AI)'; }
 }
 
 function attachGeneratedImage() {
@@ -2851,6 +3175,7 @@ loadStatus();
 document.getElementById('rssPreset').value = 'https://developer.apple.com/news/rss/news.rss';
 fetchFeed('https://developer.apple.com/news/rss/news.rss');
 loadDrafts();
+loadRejectedSources();
 checkDrawThingsStatus();
 setInterval(checkDrawThingsStatus, 30000);
 </script>
@@ -2914,7 +3239,18 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             if path == "/":
-                self._send(HTML.encode("utf-8"))
+                # Capability layer: fill platform-specific labels at serve time so
+                # Windows never renders Draw Things UI, even before JS runs.
+                if LOCAL_IMAGE_ENABLED:
+                    step3_text = f"Painting visual art with {IMAGE_BACKEND_LABEL} on Mac GPU."
+                else:
+                    step3_text = "Selecting fallback media (GIF)."
+                page = (
+                    HTML
+                    .replace("__IMAGE_LABEL__", IMAGE_BACKEND_LABEL or "Local Image")
+                    .replace("__IMAGE_STEP3__", step3_text)
+                )
+                self._send(page.encode("utf-8"))
                 return
 
             if path == "/api/status":
@@ -2929,6 +3265,13 @@ class Handler(BaseHTTPRequestHandler):
                 feed_url = query.get("url", ["https://news.ycombinator.com/rss"])[0]
                 try:
                     stories = fetch_rss_feed(feed_url)
+                    # Filter out stories the user has rejected (persisted).
+                    with db() as conn:
+                        rejected = {r[0] for r in conn.execute("SELECT url FROM sources WHERE status = 'rejected'").fetchall()}
+                    if rejected:
+                        stories = [s for s in stories if s.get("url") not in rejected]
+                    if not stories:
+                        stories = [{"title": "No new stories (all filtered). Refresh or restore rejected stories.", "url": "", "snippet": ""}]
                     self.send_json(stories)
                 except Exception as exc:
                     self.send_error_json(500, str(exc))
@@ -2961,6 +3304,12 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/sources":
                 with db() as conn:
                     rows = [dict(r) for r in conn.execute("SELECT * FROM sources ORDER BY retrieved_at DESC")]
+                self.send_json(rows)
+                return
+
+            if path == "/api/sources/rejected":
+                with db() as conn:
+                    rows = [dict(r) for r in conn.execute("SELECT * FROM sources WHERE status = 'rejected' ORDER BY retrieved_at DESC")]
                 self.send_json(rows)
                 return
 
@@ -3005,7 +3354,13 @@ class Handler(BaseHTTPRequestHandler):
 
             # Phase C: Draw Things status
             if path == "/api/draw-things-status":
-                self.send_json({"available": draw_things_available(), "url": DRAW_THINGS_URL})
+                self.send_json({
+                    "available": draw_things_available(),
+                    "url": DRAW_THINGS_URL,
+                    "supported": LOCAL_IMAGE_ENABLED,
+                    "backend": IMAGE_BACKEND,
+                    "label": IMAGE_BACKEND_LABEL,
+                })
                 return
 
             # Phase C: Serve generated media files
@@ -3092,22 +3447,71 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json({"ok": False, "error": str(exc)})
                     return
 
-            # Approve draft
+            # Approve draft (human gate)
             if path.startswith("/api/drafts/") and path.endswith("/approve"):
                 draft_id = path.split("/")[3]
                 stamp = now_iso()
                 with db() as conn:
-                    conn.execute("UPDATE drafts SET status = 'Approved', updated_at = ? WHERE id = ?", (stamp, draft_id))
-                    conn.execute("INSERT INTO approvals(draft_id, approved_at, platform, notes) VALUES(?,?,?,?)",
-                                 (draft_id, stamp, "General", "Approved by human user"))
+                    row = conn.execute("SELECT platform FROM drafts WHERE id = ?", (draft_id,)).fetchone()
+                    if row is None:
+                        raise ApiError(404, "Draft not found")
+                    conn.execute(
+                        "UPDATE drafts SET status = 'Approved', rejection_reason = '', updated_at = ? WHERE id = ?",
+                        (stamp, draft_id),
+                    )
+                    conn.execute(
+                        "INSERT INTO approvals(draft_id, approved_at, platform, notes) VALUES(?,?,?,?)",
+                        (draft_id, stamp, row["platform"], "Approved by human user"),
+                    )
                 self.send_json({"ok": True, "status": "Approved"})
                 return
 
-            # Mark draft published
+            # Reject draft (human gate). Keeps the row + reason instead of deleting it.
+            if path.startswith("/api/drafts/") and path.endswith("/reject"):
+                draft_id = path.split("/")[3]
+                reason = ""
+                try:
+                    length = int(self.headers.get("Content-Length", "0") or "0")
+                    if length > 0:
+                        raw = json.loads(self.rfile.read(length).decode("utf-8"))
+                        if isinstance(raw, dict):
+                            reason = string_field(raw, "reason")
+                except Exception:
+                    reason = ""
+                stamp = now_iso()
+                with db() as conn:
+                    row = conn.execute("SELECT id FROM drafts WHERE id = ?", (draft_id,)).fetchone()
+                    if row is None:
+                        raise ApiError(404, "Draft not found")
+                    conn.execute(
+                        "UPDATE drafts SET status = 'Rejected', rejection_reason = ?, updated_at = ? WHERE id = ?",
+                        (reason[:500], stamp, draft_id),
+                    )
+                self.send_json({"ok": True, "status": "Rejected"})
+                return
+
+            # Restore a rejected draft back into the draft queue
+            if path.startswith("/api/drafts/") and path.endswith("/restore"):
+                draft_id = path.split("/")[3]
+                stamp = now_iso()
+                with db() as conn:
+                    conn.execute(
+                        "UPDATE drafts SET status = 'Draft', rejection_reason = '', updated_at = ? WHERE id = ?",
+                        (stamp, draft_id),
+                    )
+                self.send_json({"ok": True, "status": "Draft"})
+                return
+
+            # Mark draft published (only after explicit human approval)
             if path.startswith("/api/drafts/") and path.endswith("/publish"):
                 draft_id = path.split("/")[3]
                 stamp = now_iso()
                 with db() as conn:
+                    row = conn.execute("SELECT status FROM drafts WHERE id = ?", (draft_id,)).fetchone()
+                    if row is None:
+                        raise ApiError(404, "Draft not found")
+                    if row["status"] != "Approved":
+                        raise ApiError(409, "Draft must be Approved before it can be published.")
                     conn.execute("UPDATE drafts SET status = 'Published', updated_at = ? WHERE id = ?", (stamp, draft_id))
                 self.send_json({"ok": True, "status": "Published"})
                 return
@@ -3138,6 +3542,47 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(payload, dict):
                 raise ApiError(400, "JSON payload must be an object.")
 
+            # Source intake: reject / restore / mark-used
+            if path == "/api/sources/reject":
+                url = string_field(payload, "url")
+                title = string_field(payload, "title") or url
+                stamp = now_iso()
+                with db() as conn:
+                    row = conn.execute("SELECT id FROM sources WHERE url = ?", (url,)).fetchone()
+                    if row is None:
+                        conn.execute(
+                            "INSERT INTO sources(id, url, title, publisher, retrieved_at, status) VALUES(?,?,?,?,?,?)",
+                            (f"src_{abs(hash(url))}", url, title[:200], "", stamp, "rejected"),
+                        )
+                    else:
+                        conn.execute("UPDATE sources SET status = 'rejected', title = ?, retrieved_at = ? WHERE url = ?", (title[:200], stamp, url))
+                self.send_json({"ok": True, "status": "rejected"})
+                return
+
+            if path == "/api/sources/restore":
+                url = string_field(payload, "url")
+                stamp = now_iso()
+                with db() as conn:
+                    conn.execute("UPDATE sources SET status = 'new', retrieved_at = ? WHERE url = ?", (stamp, url))
+                self.send_json({"ok": True, "status": "new"})
+                return
+
+            if path == "/api/sources/use":
+                url = string_field(payload, "url")
+                title = string_field(payload, "title") or url
+                stamp = now_iso()
+                with db() as conn:
+                    row = conn.execute("SELECT id FROM sources WHERE url = ?", (url,)).fetchone()
+                    if row is None:
+                        conn.execute(
+                            "INSERT INTO sources(id, url, title, publisher, retrieved_at, status) VALUES(?,?,?,?,?,?)",
+                            (f"src_{abs(hash(url))}", url, title[:200], "", stamp, "used"),
+                        )
+                    else:
+                        conn.execute("UPDATE sources SET status = 'used', title = ?, retrieved_at = ? WHERE url = ?", (title[:200], stamp, url))
+                self.send_json({"ok": True, "status": "used"})
+                return
+
             # Thread Formatter
             if path == "/api/format-thread":
                 text = string_field(payload, "text")
@@ -3160,6 +3605,31 @@ class Handler(BaseHTTPRequestHandler):
                 with db() as conn:
                     conn.execute("UPDATE drafts SET body = ?, updated_at = ? WHERE id = ?", (body_text, stamp, draft_id))
                 self.send_json({"ok": True, "body": body_text})
+                return
+
+            # Full edit-in-place update of an existing draft. Preserves status.
+            if path.startswith("/api/drafts/") and path.endswith("/update"):
+                draft_id = path.split("/")[3]
+                with db() as conn:
+                    row = conn.execute("SELECT * FROM drafts WHERE id = ?", (draft_id,)).fetchone()
+                    if row is None:
+                        raise ApiError(404, "Draft not found")
+                    title = string_field(payload, "title").strip() if "title" in payload else row["title"]
+                    if not title:
+                        raise ApiError(400, "Title cannot be empty.")
+                    body = string_field(payload, "body") if "body" in payload else row["body"]
+                    platform = (string_field(payload, "platform").strip() or row["platform"]) if "platform" in payload else row["platform"]
+                    image_prompt = string_field(payload, "image_prompt") if "image_prompt" in payload else row["image_prompt"]
+                    source_url = string_field(payload, "source_url") if "source_url" in payload else row["source_url"]
+                    media_url = string_field(payload, "media_url") if "media_url" in payload else row["media_url"]
+                    scheduled_for = string_field(payload, "scheduled_for") if "scheduled_for" in payload else row["scheduled_for"]
+                    stamp = now_iso()
+                    conn.execute(
+                        """UPDATE drafts SET title=?, body=?, platform=?, image_prompt=?, source_url=?,
+                           media_url=?, scheduled_for=?, updated_at=? WHERE id=?""",
+                        (title[:200], body, platform[:40], image_prompt, source_url, media_url, scheduled_for, stamp, draft_id),
+                    )
+                self.send_json({"ok": True, "id": draft_id})
                 return
 
             # Update Draft Performance Metrics (Live URL, Views, Engagements)
@@ -3314,15 +3784,26 @@ class Handler(BaseHTTPRequestHandler):
                 title = string_field(payload, "title")
                 url = string_field(payload, "url")
                 snippet = string_field(payload, "snippet")
-                platform = string_field(payload, "platform") or "LinkedIn"
                 tone = string_field(payload, "tone") or "thought_leadership"
                 provider = string_field(payload, "provider")
                 if not provider or provider == "none":
                     provider = "groq:openai/gpt-oss-120b" if os.environ.get("GROQ_API_KEY") else "auto"
                 if not title:
                     raise ApiError(400, "Title is required")
-                
-                # Agent 0: Deep Investigator
+
+                # Multi-select targets. Fall back to the single legacy platform field.
+                platform_raw = payload.get("platforms")
+                platforms = []
+                if isinstance(platform_raw, list):
+                    for entry in platform_raw:
+                        name = entry.strip() if isinstance(entry, str) else ""
+                        if name and name[:40] not in platforms:
+                            platforms.append(name[:40])
+                if not platforms:
+                    platforms = [string_field(payload, "platform") or "LinkedIn"]
+                platforms = platforms[:6]
+
+                # Agent 0: Deep Investigator (run once, share context across platforms)
                 use_deep = payload.get("deep_research", True)
                 if use_deep and url:
                     try:
@@ -3333,18 +3814,23 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     deep_text = extract_article_text(url) if url else ""
                     context = deep_text if deep_text and not deep_text.startswith("(") else (snippet or title)
-                
-                res = run_roundtable(provider, title, context, platform, tone=tone, source_url=url)
-                
+
+                # Generate one tailored draft per selected platform.
+                results = []
+                for pf in platforms:
+                    res = run_roundtable(provider, title, context, pf, tone=tone, source_url=url)
+                    results.append((pf, res))
+
+                # Media is generated once and shared across the produced drafts.
                 media_url = ""
                 if draw_things_available():
                     try:
-                        img_res = generate_local_image(res["image_prompt"], width=1024, height=576, steps=20)
+                        img_res = generate_local_image(results[0][1]["image_prompt"], width=1024, height=576, steps=20)
                         if img_res.get("ok"):
                             media_url = f"/api/media/{img_res['filename']}"
                     except Exception:
                         media_url = ""
-                
+
                 if not media_url:
                     q_words = [w for w in re.sub(r"[^\w\s]", "", title).split() if len(w) > 3 and w.lower() not in ("with", "that", "this", "from", "have")][:2]
                     try:
@@ -3353,26 +3839,36 @@ class Handler(BaseHTTPRequestHandler):
                             media_url = gifs[0]["original"]
                     except Exception:
                         media_url = ""
-                
+
                 scheduled_for = calculate_next_optimal_slot()
                 stamp = now_iso()
+                created = []
                 with db() as conn:
-                    cur = conn.execute(
-                        """INSERT INTO drafts(title, body, platform, status, image_prompt, source_url, media_url, scheduled_for, created_at, updated_at)
-                           VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                        (title[:200], res["final_post"], platform[:40], "Draft", res["image_prompt"], url, media_url, scheduled_for, stamp, stamp)
-                    )
-                    draft_id = cur.lastrowid
+                    for pf, res in results:
+                        cur = conn.execute(
+                            """INSERT INTO drafts(title, body, platform, status, image_prompt, source_url, media_url, scheduled_for, created_at, updated_at)
+                               VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                            (title[:200], res["final_post"], pf, "Draft", res["image_prompt"], url, media_url, scheduled_for, stamp, stamp)
+                        )
+                        created.append({
+                            "id": cur.lastrowid,
+                            "platform": pf,
+                            "body": res["final_post"],
+                            "image_prompt": res["image_prompt"],
+                        })
+
+                primary = created[0]
                 self.send_json({
                     "ok": True,
-                    "id": draft_id,
+                    "id": primary["id"],
                     "title": title,
-                    "body": res["final_post"],
-                    "image_prompt": res["image_prompt"],
+                    "body": primary["body"],
+                    "image_prompt": primary["image_prompt"],
                     "media_url": media_url,
                     "scheduled_for": scheduled_for,
-                    "platform": platform,
-                    "status": "Draft"
+                    "platform": primary["platform"],
+                    "status": "Draft",
+                    "drafts": created,
                 }, 201)
                 return
 
@@ -3552,9 +4048,13 @@ def main():
     try:
         server = ThreadingHTTPServer((HOST, PORT), Handler)
     except OSError as e:
-        if e.errno == 48:
+        in_use = getattr(e, "winerror", None) == 10048 or e.errno in (48, 98, 10048)
+        if in_use:
             print(f"[ContentOS Error] Port {PORT} is already in use.")
-            print(f"Run 'kill -9 $(lsof -ti :{PORT})' or double-click ContentOS.command to clear it.")
+            if sys.platform == "win32":
+                print("Run 'Get-Process python* | Stop-Process -Force' or double-click scripts\\run_windows.ps1 to clear it.")
+            else:
+                print(f"Run 'kill -9 $(lsof -ti :{PORT})' or double-click ContentOS.command to clear it.")
             sys.exit(1)
         raise
     print("============================================================")
