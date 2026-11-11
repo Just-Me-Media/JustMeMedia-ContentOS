@@ -382,7 +382,8 @@ All configuration is local-first. Credentials are auto-loaded from your shell en
 | `GROQ_API_KEY` | Groq Cloud API Key (`gsk_...`) | Loaded from `~/.zshrc` or system env |
 | `GEMINI_API_KEY` | Google Gemini API Key | Loaded from `~/.zshrc` or system env |
 | `CONTENTOS_PORT` | HTTP Server Port | `8765` |
-| `DRAW_THINGS_URL` | Local Draw Things API endpoint | `http://127.0.0.1:7860` |
+| `IMAGE_BACKEND` | Local image engine: `none`, `drawthings`, or `a1111` | `drawthings` on macOS, `none` elsewhere |
+| `DRAW_THINGS_URL` | A1111-compatible local image API endpoint (Draw Things, Forge, A1111, SD.Next) | `http://127.0.0.1:7860` |
 | `OLLAMA_BASE_URL` | Local Ollama API endpoint | `http://127.0.0.1:11434` |
 
 ### Setting Environment Variables
@@ -406,14 +407,16 @@ Reload with: `source ~/.zshrc`.
 ### Q1: Can I use ContentOS 100% offline without any internet connection?
 **Yes.** ContentOS has zero external pip dependencies and can run completely disconnected. When offline:
 * Text generation can use **Local Ollama** (`127.0.0.1:11434`).
-* Image generation can use **Draw Things** (`127.0.0.1:7860`).
+* Image generation can use **Draw Things** (`127.0.0.1:7860`) on macOS. On Windows (or any host without a local image engine) ContentOS automatically uses a matching **GIF fallback** instead.
 * If external RSS feeds are unreachable, the intake engine automatically loads built-in offline seed stories so drafting never stops.
 * The local SQLite database continues saving and serving drafts normally.
 
-### Q2: What is Draw Things and do I have to use it?
-**Draw Things is an optional local companion app.** It is a free, high-performance Mac application that runs Stable Diffusion and FLUX models directly on Apple Silicon GPUs/Neural Engines without cloud subscriptions.  
-* If you do not use Draw Things, ContentOS still provides photorealistic text prompts you can copy into Midjourney or web generators, as well as full GIF search.
-* To enable Draw Things: open the Draw Things app, go to **Settings > API Server**, and toggle on **Enable HTTP Server**. The badge in ContentOS will instantly turn `🟢 Draw Things Online`.
+### Q2: What is Draw Things, and what do Windows users use instead?
+**Draw Things is an optional, macOS-only local companion app.** It is a free, high-performance Mac application that runs Stable Diffusion and FLUX models directly on Apple Silicon GPUs/Neural Engines without cloud subscriptions.
+* On **Windows**, `IMAGE_BACKEND` defaults to `none`, so the Draw Things controls are hidden and drafts use the automatic **GIF fallback**. Nothing breaks.
+* To enable Draw Things on macOS: open the Draw Things app, go to **Settings > API Server**, and toggle on **Enable HTTP Server**. The badge in ContentOS will turn `🟢 Draw Things Online`.
+* Windows users with a capable GPU can run Forge / AUTOMATIC1111 / SD.Next and set `IMAGE_BACKEND=a1111` plus `DRAW_THINGS_URL` (default `http://127.0.0.1:7860`). The same A1111-compatible API is used.
+* If you use no local image engine, ContentOS still provides photorealistic text prompts you can copy into Midjourney or web generators, as well as full GIF search.
 
 ### Q3: Why did Groq return "Error 403: error code: 1010"?
 Cloudflare protects Groq's API and blocks generic automated clients (like default Python `urllib` signatures). ContentOS includes an authentic browser User-Agent header and auto-rate-limit retry mechanism that resolves this issue permanently.

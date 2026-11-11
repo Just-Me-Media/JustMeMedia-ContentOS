@@ -355,8 +355,21 @@ def inject_viral_hook(text: str, title: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PHASE C: LOCAL DRAW THINGS IMAGE GENERATION (AUTOMATIC1111-COMPATIBLE API)
+# PHASE C: LOCAL IMAGE GENERATION (AUTOMATIC1111-COMPATIBLE API)
 # ─────────────────────────────────────────────────────────────────────────────
+
+# Capability layer: local image generation is opt-in and platform-aware.
+# macOS defaults to Draw Things (Apple-only companion app); Windows defaults to
+# "none" and uses the GIF fallback. Set IMAGE_BACKEND=a1111 to point a Windows
+# machine at Forge/AUTOMATIC1111/SD.Next instead.
+IMAGE_BACKEND = os.environ.get(
+    "IMAGE_BACKEND",
+    "drawthings" if sys.platform == "darwin" else "none",
+).strip().lower()
+if IMAGE_BACKEND not in ("none", "drawthings", "a1111"):
+    IMAGE_BACKEND = "none"
+LOCAL_IMAGE_ENABLED = IMAGE_BACKEND in ("drawthings", "a1111")
+IMAGE_BACKEND_LABEL = {"drawthings": "Draw Things", "a1111": "Local Image API"}.get(IMAGE_BACKEND, "")
 
 DRAW_THINGS_URL = os.environ.get("DRAW_THINGS_URL", "http://127.0.0.1:7860")
 DRAW_THINGS_API_KEY = os.environ.get("DRAW_THINGS_API_KEY", "")
@@ -376,7 +389,9 @@ def _draw_things_headers(extra: dict | None = None) -> dict:
 
 
 def draw_things_available() -> bool:
-    """Check if Draw Things local API server is running."""
+    """Check if the enabled local image backend is running."""
+    if not LOCAL_IMAGE_ENABLED:
+        return False
     try:
         url = os.environ.get("DRAW_THINGS_URL", DRAW_THINGS_URL).rstrip("/")
         req = urllib.request.Request(url + "/sdapi/v1/options",
@@ -394,8 +409,10 @@ def generate_local_image(prompt: str, negative_prompt: str = "", width: int = 10
     Returns {"ok": True, "filename": "...", "b64": "..."} on success,
             {"ok": False, "error": "..."} on failure.
     """
+    if not LOCAL_IMAGE_ENABLED:
+        return {"ok": False, "error": "Local image generation is disabled on this system (IMAGE_BACKEND=none). Falling back to GIF media."}
     if not draw_things_available():
-        return {"ok": False, "error": "Draw Things API not available. Enable HTTP server in Draw Things Settings."}
+        return {"ok": False, "error": f"Local image engine ({IMAGE_BACKEND_LABEL}) is not reachable. Start the local image server."}
 
     payload = {
         "prompt": prompt,
@@ -419,7 +436,7 @@ def generate_local_image(prompt: str, negative_prompt: str = "", width: int = 10
 
         images = data.get("images", [])
         if not images:
-            return {"ok": False, "error": "Draw Things returned no images."}
+            return {"ok": False, "error": f"{IMAGE_BACKEND_LABEL or 'Local image API'} returned no images."}
 
         b64_data = images[0]
         import base64
@@ -430,7 +447,7 @@ def generate_local_image(prompt: str, negative_prompt: str = "", width: int = 10
         return {"ok": True, "filename": filename, "b64": b64_data}
 
     except urllib.error.URLError as exc:
-        return {"ok": False, "error": f"Cannot connect to Draw Things: {exc}"}
+        return {"ok": False, "error": f"Cannot connect to local image engine ({IMAGE_BACKEND_LABEL}): {exc}"}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 
@@ -1557,9 +1574,9 @@ textarea{min-height:160px;resize:vertical;font-family:inherit}
     <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
       <button id="btnAiDraft" class="btn btn-secondary" onclick="generateAiDraft()">⚡ Generate Post</button>
       <button id="btnAiVisual" class="btn btn-secondary" onclick="generateImagePrompt()">🎨 Suggest Image Prompt</button>
-      <button id="btnGenImage" class="btn btn-secondary" onclick="generateLocalImage()">🖼️ Draw Things (Local AI)</button>
+      <button id="btnGenImage" class="btn btn-secondary" onclick="generateLocalImage()">🖼️ __IMAGE_LABEL__ (Local AI)</button>
     </div>
-    <div id="dtStatus" style="margin-top:4px;font-size:11px;color:var(--muted)">Checking Draw Things…</div>
+    <div id="dtStatus" style="margin-top:4px;font-size:11px;color:var(--muted)">Checking __IMAGE_LABEL__…</div>
     <div id="generatedImagePreview" style="margin-top:8px;display:none">
       <img id="generatedImg" style="width:100%;border-radius:6px;border:1px solid var(--line)" alt="Generated image">
       <button class="btn btn-secondary btn-small" style="margin-top:4px" onclick="attachGeneratedImage()">📎 Attach to Draft</button>
@@ -1702,7 +1719,7 @@ textarea{min-height:160px;resize:vertical;font-family:inherit}
       
       <div id="mStep1" class="modal-step"><span>📖</span> <span>[1/4] Scraping deep article text & facts…</span></div>
       <div id="mStep2" class="modal-step"><span>✍️</span> <span>[2/4] Running 4-Agent Roundtable (Hook & Anti-Slop)…</span></div>
-      <div id="mStep3" class="modal-step"><span>🎨</span> <span>[3/4] Painting visual art with Draw Things on Mac GPU…</span></div>
+      <div id="mStep3" class="modal-step"><span>🎨</span> <span>[3/4] __IMAGE_STEP3__</span></div>
       <div id="mStep4" class="modal-step"><span>📅</span> <span>[4/4] Auto-scheduling optimal peak posting slot…</span></div>
       
       <p style="font-size:11px;color:#718096;text-align:center;margin-top:14px">Feel free to step away and make tea ☕ — your Mac chime & phone will alert you when complete.</p>
@@ -1917,8 +1934,8 @@ function showModalError(errMessage) {
   let advice = 'Click Dismiss and try another story or switch your AI Provider in Column 2.';
   if (errMessage.includes('Rate limit') || errMessage.includes('429')) {
     advice = 'Groq Cloud free tier requests were paced. Wait ~10 seconds and click again.';
-  } else if (errMessage.includes('Draw Things')) {
-    advice = 'Draw Things is rendering or connecting. Check Draw Things Settings -> API Server.';
+  } else if (errMessage.includes('image') || errMessage.includes('Image')) {
+    advice = 'The local image engine is not reachable. Media falls back to a GIF.';
   }
   document.getElementById('modalErrorAdvice').textContent = advice;
 }
@@ -2773,15 +2790,26 @@ async function saveOmniBundle() {
 // PHASE C: DRAW THINGS LOCAL IMAGE GENERATION
 // ─────────────────────────────────────────────────────────────────────────────
 let _generatedImageFilename = '';
+let _imageBackendLabel = 'Local Image';
 async function checkDrawThingsStatus() {
+  const el = document.getElementById('dtStatus');
+  const btn = document.getElementById('btnGenImage');
   try {
     const res = await fetch('/api/draw-things-status');
     const data = await res.json();
-    const el = document.getElementById('dtStatus');
+    if (!data.supported) {
+      // Capability layer: this host has no local image backend (e.g. Windows).
+      // Hide the feature entirely; the pipeline uses the GIF fallback instead.
+      if (btn) btn.style.display = 'none';
+      if (el) el.style.display = 'none';
+      return;
+    }
+    _imageBackendLabel = data.label || 'Local Image';
+    if (btn) btn.textContent = '🖼️ ' + _imageBackendLabel + ' (Local AI)';
     if (data.available) {
-      el.innerHTML = '<span class="draw-things-status dt-online">🟢 Draw Things Online (127.0.0.1:7860)</span>';
+      el.innerHTML = '<span class="draw-things-status dt-online">🟢 ' + _imageBackendLabel + ' Online</span>';
     } else {
-      el.innerHTML = '<span class="draw-things-status" style="background:#1b251f;border:1px solid #28382e;color:var(--muted);font-size:11px;padding:3px 8px;border-radius:4px;display:inline-block">⚪ Draw Things Offline (Optional Local AI Art — enable API in Draw Things Settings)</span>';
+      el.innerHTML = '<span class="draw-things-status" style="background:#1b251f;border:1px solid #28382e;color:var(--muted);font-size:11px;padding:3px 8px;border-radius:4px;display:inline-block">⚪ ' + _imageBackendLabel + ' Offline (start the local image server)</span>';
     }
   } catch(e) {}
 }
@@ -2803,10 +2831,10 @@ async function generateLocalImage() {
       document.getElementById('generatedImg').src = `/api/media/${data.filename}`;
       document.getElementById('generatedImagePreview').style.display = 'block';
     } else {
-      alert('Draw Things image generation: ' + data.error);
+      alert(_imageBackendLabel + ': ' + data.error);
     }
-  } catch(e) { alert('Failed to connect to Draw Things API: ' + e); }
-  finally { btn.disabled = false; btn.textContent = '🖼️ Draw Things (Local AI)'; }
+  } catch(e) { alert('Failed to reach the local image API: ' + e); }
+  finally { btn.disabled = false; btn.textContent = '🖼️ ' + _imageBackendLabel + ' (Local AI)'; }
 }
 
 function attachGeneratedImage() {
@@ -2931,7 +2959,18 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             if path == "/":
-                self._send(HTML.encode("utf-8"))
+                # Capability layer: fill platform-specific labels at serve time so
+                # Windows never renders Draw Things UI, even before JS runs.
+                if LOCAL_IMAGE_ENABLED:
+                    step3_text = f"Painting visual art with {IMAGE_BACKEND_LABEL} on Mac GPU."
+                else:
+                    step3_text = "Selecting fallback media (GIF)."
+                page = (
+                    HTML
+                    .replace("__IMAGE_LABEL__", IMAGE_BACKEND_LABEL or "Local Image")
+                    .replace("__IMAGE_STEP3__", step3_text)
+                )
+                self._send(page.encode("utf-8"))
                 return
 
             if path == "/api/status":
@@ -3022,7 +3061,13 @@ class Handler(BaseHTTPRequestHandler):
 
             # Phase C: Draw Things status
             if path == "/api/draw-things-status":
-                self.send_json({"available": draw_things_available(), "url": DRAW_THINGS_URL})
+                self.send_json({
+                    "available": draw_things_available(),
+                    "url": DRAW_THINGS_URL,
+                    "supported": LOCAL_IMAGE_ENABLED,
+                    "backend": IMAGE_BACKEND,
+                    "label": IMAGE_BACKEND_LABEL,
+                })
                 return
 
             # Phase C: Serve generated media files
