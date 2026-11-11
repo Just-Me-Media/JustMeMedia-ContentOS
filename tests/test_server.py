@@ -104,11 +104,41 @@ class TestDatabase(unittest.TestCase):
                 s.DB_PATH = orig
 
     def test_empty_title_rejected(self):
-        from app.server import ApiError
-        payload = {"title": "   ", "body": "Some body", "platform": "LinkedIn"}
-        with self.assertRaises(ApiError) as cm:
-            raise ApiError(400, "Title is required.")
-        self.assertIn("Title is required", str(cm.exception))
+        import tempfile
+        from pathlib import Path
+        import threading
+        from http.server import ThreadingHTTPServer
+        import app.server as s
+        orig = s.DB_PATH
+        tmp = Path(tempfile.mkdtemp())
+        s.DB_PATH = tmp / "contentos.db"
+        try:
+            s.connect_db()
+            server = ThreadingHTTPServer(("127.0.0.1", 0), s.Handler)
+            port = server.server_address[1]
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                import json
+                import urllib.error
+                import urllib.request
+                body = json.dumps({"title": "   ", "body": "Some body", "platform": "LinkedIn"}).encode("utf-8")
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/api/drafts",
+                    data=body,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                try:
+                    urllib.request.urlopen(req, timeout=5)
+                    self.fail("Expected 400 for empty title")
+                except urllib.error.HTTPError as exc:
+                    self.assertEqual(exc.code, 400)
+                    self.assertIn("Title is required", exc.read().decode("utf-8"))
+            finally:
+                server.shutdown()
+        finally:
+            s.DB_PATH = orig
 
     def test_empty_body_accepted_with_default(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -182,11 +212,15 @@ class TestPhasesAtoE(unittest.TestCase):
 
     def test_draw_things_unavailable(self):
         from app.server import generate_local_image
-        # No local image engine is reachable in the test sandbox. The call must
-        # fail gracefully with a clean dict, never an exception.
-        res = generate_local_image("a futuristic workstation")
-        self.assertFalse(res["ok"])
-        self.assertTrue(res["error"])
+        import app.server as server
+        orig = server.draw_things_available
+        server.draw_things_available = lambda: False
+        try:
+            res = generate_local_image("a futuristic workstation")
+            self.assertFalse(res["ok"])
+            self.assertTrue(res["error"])
+        finally:
+            server.draw_things_available = orig
 
     def test_image_backend_capability(self):
         from app import server
