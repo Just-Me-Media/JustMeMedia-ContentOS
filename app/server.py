@@ -228,6 +228,11 @@ def connect_db() -> sqlite3.Connection:
         )
     """)
 
+    cur = conn.execute("PRAGMA table_info(sources)")
+    cols = [row["name"] for row in cur.fetchall()]
+    if "status" not in cols:
+        conn.execute("ALTER TABLE sources ADD COLUMN status TEXT NOT NULL DEFAULT 'new'")
+
     # 4. Claims table
     conn.execute("""
         CREATE TABLE IF NOT EXISTS claims (
@@ -1518,6 +1523,10 @@ textarea{min-height:160px;resize:vertical;font-family:inherit}
     </div>
     <input id="keywordFilter" placeholder="🔍 Filter stories by keyword…" oninput="applyFilter()" style="width:100%;margin-bottom:8px">
     <div id="sourcesList" style="flex:1;overflow-y:auto;max-height:420px">Loading stories…</div>
+    <details style="margin-top:10px">
+      <summary style="cursor:pointer;font-size:11px;color:var(--muted);font-weight:600">🚫 Rejected stories (<span id="rejectedSourcesCount">0</span>) — click to restore</summary>
+      <div id="rejectedSourcesList" style="margin-top:6px;font-size:11px;color:var(--muted)">Loading…</div>
+    </details>
   </section>
 
   <!-- COLUMN 2: DRAFTING & AI ENGINE -->
@@ -1881,12 +1890,21 @@ async function fetchFeed(url) {
       return;
     }
     window._sources = items;
+    // Mark stories already used (a draft exists for that source URL)
+    try {
+      const dr = await fetch('/api/drafts');
+      const drafts = await dr.json();
+      window._usedUrls = new Set((drafts || []).map(d => d.source_url).filter(Boolean));
+    } catch (e) { window._usedUrls = new Set(); }
     // Re-apply any active keyword/topic filter after feed refresh
     setTimeout(applyFilter, 50);
-    listEl.innerHTML = items.map((item, idx) => `
-      <div class="source-item">
+    listEl.innerHTML = items.map((item, idx) => {
+      const used = window._usedUrls && window._usedUrls.has(item.url);
+      return `
+      <div class="source-item" ${used ? 'style="opacity:.7;border-left:3px solid #2b6cb0"' : ''}>
         <a href="${item.url}" target="_blank" rel="noopener">${escapeHtml(item.title)}</a>
         <p style="margin:4px 0 6px;color:var(--muted);font-size:11px">${escapeHtml(item.snippet)}</p>
+        ${used ? '<div style="font-size:10px;color:#90cdf4;font-weight:700;margin-bottom:4px">✓ Already staged as a draft</div>' : ''}
         <div style="display:flex;gap:6px;flex-wrap:wrap">
           <button id="btnOneClick_${idx}" class="btn btn-small" style="background:#22543d;color:#9ae6b4;border:1px solid #2f855a;font-weight:700" onclick="oneClickCreate(${idx})">
             ✨ 1-Click Create & Stage
@@ -1894,16 +1912,82 @@ async function fetchFeed(url) {
           <button class="btn btn-secondary btn-small" onclick="useStory(${idx})">
             ⚡ Deep-Read & Draft
           </button>
+          <button class="btn btn-small" style="background:transparent;border:1px solid #742a2a;color:#feb2b2" onclick="rejectSource(${idx})" title="Hide this story and never show it again">
+            🚫 Reject
+          </button>
         </div>
       </div>
-    `).join('');
+    `;
+    }).join('');
   } catch (err) {
     listEl.innerHTML = '<div style="color:var(--danger);padding:10px 0">Failed to fetch RSS feed.</div>';
   }
 }
 
 
-// ── PIPELINE GUIDANCE MODAL CONTROLS ──────────────────────────────────────────
+async function rejectSource(idx) {
+  const item = (window._sources || [])[idx];
+  if (!item) return;
+  if (!confirm('Reject this story? It will be hidden and never shown again (you can restore it in the Rejected list).')) return;
+  try {
+    await fetch('/api/sources/reject', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({url: item.url, title: item.title})
+    });
+  } catch (e) {}
+  // Remove from the current list immediately
+  window._sources.splice(idx, 1);
+  // Re-render
+  const listEl = document.getElementById('sourcesList');
+  if (!window._sources.length) {
+    listEl.innerHTML = '<div style="color:var(--muted);padding:10px 0">No stories left. Fetch a feed to load more.</div>';
+    return;
+  }
+  // Rebuild by re-running fetchFeed's render path is heavy; just reload the feed's cached list via applyFilter
+  // Simpler: re-render inline
+  listEl.innerHTML = window._sources.map((it, i) => `
+    <div class="source-item">
+      <a href="${it.url}" target="_blank" rel="noopener">${escapeHtml(it.title)}</a>
+      <p style="margin:4px 0 6px;color:var(--muted);font-size:11px">${escapeHtml(it.snippet)}</p>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <button class="btn btn-small" style="background:#22543d;color:#9ae6b4;border:1px solid #2f855a;font-weight:700" onclick="oneClickCreate(${i})">✨ 1-Click Create & Stage</button>
+        <button class="btn btn-secondary btn-small" onclick="useStory(${i})">⚡ Deep-Read & Draft</button>
+        <button class="btn btn-small" style="background:transparent;border:1px solid #742a2a;color:#feb2b2" onclick="rejectSource(${i})">🚫 Reject</button>
+      </div>
+    </div>
+  `).join('');
+  loadRejectedSources();
+}
+async function loadRejectedSources() {
+  try {
+    const res = await fetch('/api/sources/rejected');
+    const items = await res.json();
+    const el = document.getElementById('rejectedSourcesList');
+    const cnt = document.getElementById('rejectedSourcesCount');
+    if (cnt) cnt.textContent = items.length;
+    if (!items.length) {
+      el.innerHTML = '<div style="color:var(--muted)">No rejected stories.</div>';
+      return;
+    }
+    el.innerHTML = items.map(s => `
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;padding:4px 0;border-bottom:1px solid #1a2430">
+        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(s.title)}">${escapeHtml(s.title)}</span>
+        <button class="btn btn-small btn-secondary" onclick="restoreRejectedSource('${escapeHtml(s.url)}')">↩️ Restore</button>
+      </div>
+    `).join('');
+  } catch (e) {}
+}
+
+async function restoreRejectedSource(url) {
+  await fetch('/api/sources/restore', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({url})
+  });
+  loadRejectedSources();
+  fetchFeed(document.getElementById('rssPreset').value);
+}
 function openPipelineModal(title) {
   document.getElementById('modalLoadingView').style.display = 'block';
   document.getElementById('modalSuccessView').style.display = 'none';
@@ -2065,6 +2149,13 @@ async function oneClickCreate(idx) {
       // The primary draft already exists, so Save should update instead of duplicating.
       setEditingDraft(data.id);
 
+      // Mark this story as used so it shows a badge on refresh
+      if (item.url) {
+        try { await fetch('/api/sources/use', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({url: item.url, title: item.title})}); } catch(e) {}
+        if (!window._usedUrls) window._usedUrls = new Set();
+        window._usedUrls.add(item.url);
+      }
+
       // Refresh drafts queue
       loadDrafts();
 
@@ -2222,6 +2313,13 @@ async function useStory(idx) {
   
   updateCharCount();
   document.getElementById('draftTitle').focus();
+
+  // Mark this story as used
+  if (item.url) {
+    try { fetch('/api/sources/use', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({url: item.url, title: item.title})}); } catch(e) {}
+    if (!window._usedUrls) window._usedUrls = new Set();
+    window._usedUrls.add(item.url);
+  }
 }
 
 function updateCharCount() {
@@ -3077,6 +3175,7 @@ loadStatus();
 document.getElementById('rssPreset').value = 'https://developer.apple.com/news/rss/news.rss';
 fetchFeed('https://developer.apple.com/news/rss/news.rss');
 loadDrafts();
+loadRejectedSources();
 checkDrawThingsStatus();
 setInterval(checkDrawThingsStatus, 30000);
 </script>
@@ -3166,6 +3265,13 @@ class Handler(BaseHTTPRequestHandler):
                 feed_url = query.get("url", ["https://news.ycombinator.com/rss"])[0]
                 try:
                     stories = fetch_rss_feed(feed_url)
+                    # Filter out stories the user has rejected (persisted).
+                    with db() as conn:
+                        rejected = {r[0] for r in conn.execute("SELECT url FROM sources WHERE status = 'rejected'").fetchall()}
+                    if rejected:
+                        stories = [s for s in stories if s.get("url") not in rejected]
+                    if not stories:
+                        stories = [{"title": "No new stories (all filtered). Refresh or restore rejected stories.", "url": "", "snippet": ""}]
                     self.send_json(stories)
                 except Exception as exc:
                     self.send_error_json(500, str(exc))
@@ -3198,6 +3304,12 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/sources":
                 with db() as conn:
                     rows = [dict(r) for r in conn.execute("SELECT * FROM sources ORDER BY retrieved_at DESC")]
+                self.send_json(rows)
+                return
+
+            if path == "/api/sources/rejected":
+                with db() as conn:
+                    rows = [dict(r) for r in conn.execute("SELECT * FROM sources WHERE status = 'rejected' ORDER BY retrieved_at DESC")]
                 self.send_json(rows)
                 return
 
@@ -3429,6 +3541,47 @@ class Handler(BaseHTTPRequestHandler):
 
             if not isinstance(payload, dict):
                 raise ApiError(400, "JSON payload must be an object.")
+
+            # Source intake: reject / restore / mark-used
+            if path == "/api/sources/reject":
+                url = string_field(payload, "url")
+                title = string_field(payload, "title") or url
+                stamp = now_iso()
+                with db() as conn:
+                    row = conn.execute("SELECT id FROM sources WHERE url = ?", (url,)).fetchone()
+                    if row is None:
+                        conn.execute(
+                            "INSERT INTO sources(id, url, title, publisher, retrieved_at, status) VALUES(?,?,?,?,?,?)",
+                            (f"src_{abs(hash(url))}", url, title[:200], "", stamp, "rejected"),
+                        )
+                    else:
+                        conn.execute("UPDATE sources SET status = 'rejected', title = ?, retrieved_at = ? WHERE url = ?", (title[:200], stamp, url))
+                self.send_json({"ok": True, "status": "rejected"})
+                return
+
+            if path == "/api/sources/restore":
+                url = string_field(payload, "url")
+                stamp = now_iso()
+                with db() as conn:
+                    conn.execute("UPDATE sources SET status = 'new', retrieved_at = ? WHERE url = ?", (stamp, url))
+                self.send_json({"ok": True, "status": "new"})
+                return
+
+            if path == "/api/sources/use":
+                url = string_field(payload, "url")
+                title = string_field(payload, "title") or url
+                stamp = now_iso()
+                with db() as conn:
+                    row = conn.execute("SELECT id FROM sources WHERE url = ?", (url,)).fetchone()
+                    if row is None:
+                        conn.execute(
+                            "INSERT INTO sources(id, url, title, publisher, retrieved_at, status) VALUES(?,?,?,?,?,?)",
+                            (f"src_{abs(hash(url))}", url, title[:200], "", stamp, "used"),
+                        )
+                    else:
+                        conn.execute("UPDATE sources SET status = 'used', title = ?, retrieved_at = ? WHERE url = ?", (title[:200], stamp, url))
+                self.send_json({"ok": True, "status": "used"})
+                return
 
             # Thread Formatter
             if path == "/api/format-thread":
