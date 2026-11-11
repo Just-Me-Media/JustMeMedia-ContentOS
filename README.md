@@ -81,6 +81,6 @@ JustMeMedia ContentOS is a zero-dependency, local-first content operations syste
 # Start server
 cd app && python3 server.py
 
-# Run test suite (25/25 passing)
+# Run test suite (37/37 passing)
 PYTHONPATH=. python3 -B -m unittest -v tests/test_server.py
 ```

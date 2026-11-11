@@ -1,3 +1,9 @@
+-- NOTE: This schema file is legacy / documentation-only. The live schema is
+-- defined in app/server.py::connect_db() and creates these tables:
+--   drafts, content_items, content_versions, sources, claims, approvals,
+--   rejected_sources, github_repos, draft_versions, activity_log, templates,
+--   github_top10_issues
+-- Do not use this file for migrations; it is preserved for reference only.
 -- Initial logical schema. Apply through a migration runner in a later implementation.
 PRAGMA foreign_keys = ON;
 

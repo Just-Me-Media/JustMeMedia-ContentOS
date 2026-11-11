@@ -1167,7 +1167,7 @@ def format_as_thread(post_text: str, max_tweet_len: int = 270) -> list[str]:
     total = len(raw_tweets)
     if total <= 1:
         t = raw_tweets[0] if raw_tweets else clean_text
-        return [t[:280]]
+        return [t[:max_tweet_len]]
 
     final_tweets = []
     for i, tw in enumerate(raw_tweets):
@@ -1199,10 +1199,6 @@ def format_for_x(text: str, max_chars: int = 280) -> str:
     primary_url = urls[0].rstrip(".,;)") if urls else ""
     hashtags = re.findall(r"#\w+", cleaned)
     tags_str = " ".join(hashtags[:2]) if hashtags else ""
-
-    if len(cleaned.strip()) <= max_chars:
-        if not primary_url or primary_url in cleaned:
-            return cleaned.strip()
 
     prose = cleaned
     for u in urls:

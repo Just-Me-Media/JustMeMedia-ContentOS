@@ -19,7 +19,7 @@
 - [x] **4-Agent Consensus Pipeline**: Drafter ➔ Fact-Checker ➔ Hook Optimizer ➔ Anti-Slop Filter.
 - [x] **Human Approval State Machine**: `Draft` ➔ `Approved` ➔ `Published` with audit trail.
 - [x] **Webhook Dispatcher**: One-click dispatch of drafts to Discord, Slack, n8n, Make.
-- [x] **Unit Test Suite**: 27/27 passing unit tests in <0.5s.
+- [x] **Unit Test Suite**: 37/37 passing unit tests in <0.5s.
 
 ---
 
