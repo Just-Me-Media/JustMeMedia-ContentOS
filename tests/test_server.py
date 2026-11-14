@@ -296,29 +296,16 @@ class TestPhasesAtoE(unittest.TestCase):
         self.assertIn("body", slides[0])
 
     def test_draw_things_unavailable(self):
-        from app.server import generate_local_image
-        # Force Draw Things to appear offline regardless of the local environment,
-        # then assert the graceful error contract.
+        # Always mock draw_things_available so the test never opens a socket.
+        # The raw call outside a mock was the source of the CI hang.
         import app.server as server
+        from app.server import generate_local_image
         orig = server.draw_things_available
         server.draw_things_available = lambda: False
         try:
             res = generate_local_image("a futuristic workstation")
             self.assertFalse(res["ok"])
             self.assertIn("Draw Things API not available", res["error"])
-        finally:
-            server.draw_things_available = orig
-        # Draw Things is offline in sandboxed test run; should gracefully return error dict
-        res = generate_local_image("a futuristic workstation")
-        self.assertFalse(res["ok"])
-        self.assertIn("Draw Things API not available", res["error"])
-        import app.server as server
-        orig = server.draw_things_available
-        server.draw_things_available = lambda: False
-        try:
-            res = generate_local_image("a futuristic workstation")
-            self.assertFalse(res["ok"])
-            self.assertTrue(res["error"])
         finally:
             server.draw_things_available = orig
 
