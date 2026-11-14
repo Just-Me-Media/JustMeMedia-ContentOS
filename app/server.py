@@ -61,7 +61,7 @@ MAX_BODY_BYTES = 2_000_000
 
 # Application version (bump for releases)
 CONTENTOS_VERSION = "1.0.0"
-GITHUB_REPO = "justmeMedia/ContentOS"  # Update to your actual repo
+GITHUB_REPO = "Just-Me-Media/JustMeMedia-ContentOS"
 
 _ENV_KEY_FALLBACK = frozenset({
     "GROQ_API_KEY", "GEMINI_API_KEY",
