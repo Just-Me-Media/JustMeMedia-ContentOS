@@ -24,17 +24,85 @@ TWITTER_API = "https://api.twitter.com/2"
 TWITTER_UPLOAD = "https://upload.twitter.com/1.1"
 
 
+def _oauth2_client_credentials() -> tuple[str, str]:
+    """Return (client_id, client_secret) for OAuth 2.0 Bearer Token auth."""
+    return (
+        os.environ.get("CONTENTOS_X_CLIENT_ID", "").strip(),
+        os.environ.get("CONTENTOS_X_CLIENT_SECRET", "").strip(),
+    )
+
+
+def _get_bearer_token() -> str:
+    """Get OAuth 2.0 Bearer Token using client credentials grant.
+    
+    Returns the bearer token or empty string if auth fails.
+    """
+    import base64
+    client_id, client_secret = _oauth2_client_credentials()
+    if not client_id or not client_secret:
+        return ""
+    
+    # Encode client credentials as Basic auth
+    creds = f"{client_id}:{client_secret}"
+    encoded = base64.b64encode(creds.encode()).decode()
+    
+    data = urllib.parse.urlencode({
+        "grant_type": "client_credentials",
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "client_type": "public",
+    }).encode()
+    
+    try:
+        req = urllib.request.Request(
+            "https://api.twitter.com/2/oauth2/token",
+            data=data,
+            headers={
+                "Authorization": f"Basic {encoded}",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            result = json.loads(resp.read().decode())
+        token = result.get("access_token", "")
+        if token:
+            return token
+    except urllib.error.HTTPError as exc:
+        err = exc.read().decode()[:500]
+        print(f"[X OAuth2] Token error: {err}")
+    except Exception as exc:
+        print(f"[X OAuth2] Error: {exc}")
+    
+    return ""
+
+
 def _bearer() -> str:
+    """Get the Bearer token. Prefers OAuth 2.0 client credentials grant,
+    falls back to pre-generated access token if set."""
+    # First try OAuth 2.0 client credentials
+    token = _get_bearer_token()
+    if token:
+        return token
+    
+    # Fall back to pre-set access token
     return os.environ.get("CONTENTOS_X_ACCESS_TOKEN",
                           os.environ.get("X_ACCESS_TOKEN",
                           os.environ.get("TWITTER_ACCESS_TOKEN", ""))).strip()
 
 
-def _oauth1() -> tuple[str, str, str]:
-    """Return (consumer_key, consumer_secret, access_token_secret) or empty strings."""
+def _oauth1_access_token() -> str:
+    """Return the OAuth 1.0a access token (falls back to bearer token)."""
+    return os.environ.get("CONTENTOS_X_OAUTH_ACCESS_TOKEN",
+                         os.environ.get("CONTENTOS_X_ACCESS_TOKEN", "")).strip()
+
+
+def _oauth1() -> tuple[str, str, str, str]:
+    """Return (consumer_key, consumer_secret, access_token, access_token_secret) or empty strings."""
     return (
         os.environ.get("CONTENTOS_X_CONSUMER_KEY", "").strip(),
         os.environ.get("CONTENTOS_X_CONSUMER_SECRET", "").strip(),
+        _oauth1_access_token(),
         os.environ.get("CONTENTOS_X_ACCESS_TOKEN_SECRET", "").strip(),
     )
 
@@ -45,8 +113,9 @@ def _oauth1_header(method: str, url: str, params: dict | None = None) -> str:
     import hashlib
     import hmac
 
-    ck, cs, ats = _oauth1()
-    at = _bearer()
+    ck, cs, at, ats = _oauth1()
+    if not at:
+        at = _bearer()
     if not (ck and cs and at and ats):
         return ""
 
@@ -150,11 +219,15 @@ def _upload_media(media_url: str) -> str:
 
 def publish(draft_id: int, title: str, body: str,
             image_url: str = "", media_url: str = "") -> PublishResult:
-    """Publish a tweet to X / Twitter."""
+    """Publish a tweet to X / Twitter using OAuth 2.0 Bearer Token."""
     token = _bearer()
-    if not token:
+    ck, cs, at, ats = _oauth1()
+    use_oauth1 = bool(ck and cs and at and ats)
+
+    if not use_oauth1 and not token:
         return PublishResult(ok=False, platform="x",
-                             error="X/Twitter access token not configured")
+                             error="X/Twitter credentials not configured. Set CONTENTOS_X_CLIENT_ID + "
+                                   "CONTENTOS_X_CLIENT_SECRET (OAuth 2.0) or OAuth 1.0a keys.")
 
     tweet_text = body
     if title:
@@ -166,19 +239,28 @@ def publish(draft_id: int, title: str, body: str,
 
     payload: dict = {"text": tweet_text}
 
-    # Upload media if provided
-    mid = _upload_media(media_url or image_url) if (media_url or image_url) else ""
-    if mid:
-        payload["media"] = {"media_ids": [mid]}
+    # Upload media if provided (requires OAuth 1.0a)
+    if (media_url or image_url) and use_oauth1:
+        mid = _upload_media(media_url or image_url)
+        if mid:
+            payload["media"] = {"media_ids": [mid]}
 
     data = json.dumps(payload).encode()
+    if use_oauth1:
+        auth = _oauth1_header("POST", f"{TWITTER_API}/tweets")
+        headers = {
+            "Authorization": auth,
+            "Content-Type": "application/json",
+        }
+    else:
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
     req = urllib.request.Request(
         f"{TWITTER_API}/tweets",
         data=data,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        },
+        headers=headers,
         method="POST",
     )
     try:

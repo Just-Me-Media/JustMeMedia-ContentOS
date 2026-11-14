@@ -79,6 +79,24 @@ def is_url_already_processed(url: str) -> bool:
     return False
 
 
+def get_active_feeds() -> list[str]:
+    """Return watchlist feeds (if any) plus DEFAULT_FEEDS as fallback."""
+    try:
+        import sqlite3
+        from app.server import DB_PATH
+        conn = sqlite3.connect(str(DB_PATH))
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute(
+            "SELECT url FROM source_watchlist WHERE enabled = 1 ORDER BY created_at DESC")
+        rows = [r["url"] for r in cur.fetchall()]
+        conn.close()
+        if rows:
+            return rows
+    except Exception:
+        pass
+    return DEFAULT_FEEDS
+
+
 def run_worker_cycle(provider: str | None = None, limit_per_feed: int = 1) -> int:
     """Scan feeds, find new stories, run roundtable, and queue drafts."""
     # Determine best provider if not specified
@@ -93,7 +111,8 @@ def run_worker_cycle(provider: str | None = None, limit_per_feed: int = 1) -> in
     log(f"Starting intake cycle using AI provider: {provider}")
     drafts_created = 0
 
-    for feed_url in DEFAULT_FEEDS:
+    active_feeds = get_active_feeds()
+    for feed_url in active_feeds:
         try:
             log(f"Checking feed: {feed_url}")
             stories = fetch_rss_feed(feed_url, limit=limit_per_feed + 2)

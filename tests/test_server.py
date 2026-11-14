@@ -162,6 +162,90 @@ class TestDatabase(unittest.TestCase):
             finally:
                 s.DB_PATH = orig
 
+    def test_draft_body_html_roundtrip(self):
+        """Rich-text HTML is stored alongside the plain-text body."""
+        import threading
+        from http.server import ThreadingHTTPServer
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            test_dir = Path(tmp_dir)
+            orig = s.DB_PATH
+            s.DB_PATH = test_dir / "contentos.db"
+            try:
+                s.connect_db()
+                server = ThreadingHTTPServer(("127.0.0.1", 0), s.Handler)
+                port = server.server_address[1]
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    html = '<div>Hello <b>bold</b> <span style="color: #15BF7F">green</span></div>'
+                    payload = {
+                        "title": "Rich Draft",
+                        "body": "Hello bold green",
+                        "body_html": html,
+                        "platform": "LinkedIn",
+                    }
+                    req = Request(
+                        f"http://127.0.0.1:{port}/api/drafts",
+                        data=json.dumps(payload).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    created = json.loads(urlopen(req, timeout=5).read())
+                    self.assertTrue(created.get("id"))
+
+                    drafts = json.loads(urlopen(f"http://127.0.0.1:{port}/api/drafts", timeout=5).read())
+                    row = next(d for d in drafts if d["id"] == created["id"])
+                    self.assertEqual(row["body"], "Hello bold green")
+                    self.assertIn("<b>bold</b>", row["body_html"])
+                    self.assertIn("#15BF7F", row["body_html"])
+
+                    update = {
+                        "title": "Rich Draft",
+                        "body": "Updated copy",
+                        "body_html": "<div>Updated <i>copy</i></div>",
+                        "platform": "LinkedIn",
+                        "tags": "",
+                        "image_prompt": "",
+                        "media_url": "",
+                    }
+                    req = Request(
+                        f"http://127.0.0.1:{port}/api/drafts/{created['id']}/update",
+                        data=json.dumps(update).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    urlopen(req, timeout=5).read()
+
+                    drafts = json.loads(urlopen(f"http://127.0.0.1:{port}/api/drafts", timeout=5).read())
+                    row = next(d for d in drafts if d["id"] == created["id"])
+                    self.assertEqual(row["body"], "Updated copy")
+                    self.assertIn("<i>copy</i>", row["body_html"])
+
+                    # The pre-update version snapshot keeps its rich-text HTML
+                    versions = json.loads(urlopen(
+                        f"http://127.0.0.1:{port}/api/drafts/{created['id']}/versions", timeout=5
+                    ).read())
+                    snapshot = next(v for v in versions if "<b>bold</b>" in (v.get("body_html") or ""))
+                    self.assertEqual(snapshot["body"], "Hello bold green")
+
+                    # Reverting restores formatting as well as plain text
+                    req = Request(
+                        f"http://127.0.0.1:{port}/api/drafts/{created['id']}/revert",
+                        data=json.dumps({"version_id": snapshot["id"]}).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    urlopen(req, timeout=5).read()
+                    drafts = json.loads(urlopen(f"http://127.0.0.1:{port}/api/drafts", timeout=5).read())
+                    row = next(d for d in drafts if d["id"] == created["id"])
+                    self.assertEqual(row["body"], "Hello bold green")
+                    self.assertIn("<b>bold</b>", row["body_html"])
+                finally:
+                    server.shutdown()
+            finally:
+                s.DB_PATH = orig
+
     def test_missing_content_length_rejected(self):
         from app.server import ApiError
         with self.assertRaises(ApiError) as cm:
@@ -532,6 +616,190 @@ class TestGitHubTrending(unittest.TestCase):
         result = fetch_github_trending("python", "python", 7)
         self.assertIsInstance(result, list)
         self.assertGreater(len(result), 0)
+
+
+class TestChatAssistant(unittest.TestCase):
+    def test_parse_well_formed_sections(self):
+        from app.server import parse_chat_response
+        parsed = parse_chat_response(
+            "Here are ways to improve it.\n\n"
+            "---REVISED POST---\nStronger post.\n---END REVISED POST---\n\n"
+            "---IMAGE PROMPT---\nA desk with a green glow.\n---END IMAGE PROMPT---"
+        )
+        self.assertEqual(parsed["reply"], "Here are ways to improve it.")
+        self.assertEqual(parsed["suggested_body"], "Stronger post.")
+        self.assertEqual(parsed["image_prompt"], "A desk with a green glow.")
+
+    def test_parse_missing_end_markers(self):
+        from app.server import parse_chat_response
+        parsed = parse_chat_response(
+            "---REVISED POST---\nRewritten.\n\n---IMAGE PROMPT---\nMinimal 3D render."
+        )
+        self.assertEqual(parsed["suggested_body"], "Rewritten.")
+        self.assertEqual(parsed["image_prompt"], "Minimal 3D render.")
+        self.assertNotIn("IMAGE PROMPT", parsed["suggested_body"])
+
+    def test_parse_reply_only(self):
+        from app.server import parse_chat_response
+        parsed = parse_chat_response("Just a conversational answer.")
+        self.assertEqual(parsed["reply"], "Just a conversational answer.")
+        self.assertEqual(parsed["suggested_body"], "")
+        self.assertEqual(parsed["image_prompt"], "")
+
+    def test_chat_empty_message_rejected(self):
+        import threading
+        from http.server import ThreadingHTTPServer
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            orig = s.DB_PATH
+            s.DB_PATH = Path(tmp_dir) / "contentos.db"
+            try:
+                s.connect_db()
+                server = ThreadingHTTPServer(("127.0.0.1", 0), s.Handler)
+                port = server.server_address[1]
+                threading.Thread(target=server.serve_forever, daemon=True).start()
+                try:
+                    req = Request(
+                        f"http://127.0.0.1:{port}/api/chat",
+                        data=json.dumps({"message": "   "}).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    with self.assertRaises(HTTPError) as ctx:
+                        urlopen(req, timeout=5)
+                    self.assertEqual(ctx.exception.code, 400)
+                    self.assertIn("message is required", ctx.exception.read().decode("utf-8"))
+                finally:
+                    server.shutdown()
+            finally:
+                s.DB_PATH = orig
+
+
+    def test_parse_search_request(self):
+        from app.server import parse_search_request
+        raw = "---SEARCH---\n  local-first AI adoption  \n---END SEARCH---"
+        self.assertEqual(parse_search_request(raw), "local-first AI adoption")
+        self.assertEqual(parse_search_request('---SEARCH--- "edge AI survey" ---END SEARCH---'), "edge AI survey")
+        self.assertEqual(parse_search_request("No search needed."), "")
+
+    def test_parse_chat_response_strips_search_block(self):
+        from app.server import parse_chat_response
+        parsed = parse_chat_response(
+            "Let me check that.\n\n---SEARCH---\nlocal-first AI adoption\n---END SEARCH---"
+        )
+        self.assertEqual(parsed["reply"], "Let me check that.")
+        self.assertNotIn("SEARCH", parsed["reply"])
+
+    def test_run_chat_executes_one_requested_search(self):
+        import app.server as s
+        calls = []
+        source = {
+            "title": "Local-first AI report",
+            "url": "https://example.com/report",
+            "snippet": "Adoption is rising.",
+        }
+
+        def fake_call(provider, prompt, system_prompt):
+            calls.append(prompt)
+            if len(calls) == 1:
+                return "---SEARCH---\nlocal-first AI adoption\n---END SEARCH---"
+            return (
+                "Here is what the report says.\n\n"
+                "---REVISED POST---\nA stronger post.\n---END REVISED POST---"
+            )
+
+        original = (s.call_ai, s.web_research)
+        try:
+            s.call_ai = fake_call
+            s.web_research = lambda query, limit=5: [source]
+            result = s.run_chat("test:model", "Find data", title="Local-first AI", body="Draft")
+        finally:
+            s.call_ai, s.web_research = original
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(result["sources"], [source])
+        self.assertIn(source["url"], calls[1])
+        self.assertEqual(result["suggested_body"], "A stronger post.")
+
+    def test_run_chat_skips_search_when_not_requested(self):
+        import app.server as s
+        original = (s.call_ai, s.web_research)
+        try:
+            s.call_ai = lambda provider, prompt, system_prompt: "Just an answer."
+            s.web_research = lambda query, limit=5: self.fail("search should not run")
+            result = s.run_chat("test:model", "Improve this", title="T", body="B")
+        finally:
+            s.call_ai, s.web_research = original
+
+        self.assertEqual(result["reply"], "Just an answer.")
+        self.assertEqual(result["sources"], [])
+
+
+    def test_run_chat_verifies_unbacked_search_claims(self):
+        import app.server as s
+        calls = []
+        source = {"title": "Report", "url": "https://example.com/r", "snippet": "Data."}
+
+        def fake_call(provider, prompt, system_prompt):
+            calls.append(prompt)
+            if len(calls) == 1:
+                return "I ran a quick search and recent reports agree."
+            return "Grounded answer."
+
+        original = (s.call_ai, s.web_research)
+        try:
+            s.call_ai = fake_call
+            s.web_research = lambda query, limit=5: [source]
+            result = s.run_chat("test:model", "Add evidence", title="Local-first AI", body="Draft")
+        finally:
+            s.call_ai, s.web_research = original
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(result["sources"], [source])
+        self.assertEqual(result["reply"], "Grounded answer.")
+
+
+class TestResearchHelpers(unittest.TestCase):
+    def test_relevance_filter_drops_single_term_junk(self):
+        from app.server import _query_terms, _relevant_results
+        terms = _query_terms("edge AI adoption survey 2025")
+        junk = {
+            "title": "Download Microsoft Edge | Windows, Mac & Linux",
+            "snippet": "Microsoft Edge is the AI-powered browser.",
+            "url": "https://www.microsoft.com/edge",
+        }
+        good = {
+            "title": "2025 Edge AI Technology Report",
+            "snippet": "Adoption survey of edge AI deployments.",
+            "url": "https://example.com/edge-ai",
+        }
+        kept = _relevant_results([junk, good], terms)
+        self.assertEqual([row["title"] for row in kept], ["2025 Edge AI Technology Report"])
+
+    def test_web_research_filters_and_dedupes(self):
+        import app.server as s
+        good = {
+            "title": "2025 Edge AI Adoption Survey",
+            "snippet": "Adoption of edge AI is rising.",
+            "url": "https://example.com/edge-ai-survey",
+        }
+        junk = {
+            "title": "Download Microsoft Edge",
+            "snippet": "Microsoft Edge is the AI-powered browser.",
+            "url": "https://www.microsoft.com/edge",
+        }
+        original = (s._bing_rss_search, s._bing_search, s._ddg_search, s._wiki_search)
+        try:
+            s._bing_rss_search = lambda query, limit: [junk, good, dict(good)]
+            s._bing_search = lambda query, limit: []
+            s._ddg_search = lambda query, limit: []
+            s._wiki_search = lambda query, limit: []
+            with s._RESEARCH_CACHE_LOCK:
+                s._RESEARCH_CACHE.clear()
+            rows = s.web_research("edge AI adoption survey 2025", 3)
+            self.assertEqual([row["url"] for row in rows], [good["url"]])
+        finally:
+            s._bing_rss_search, s._bing_search, s._ddg_search, s._wiki_search = original
 
 
 if __name__ == "__main__":
