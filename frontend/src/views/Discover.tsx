@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
 import type { SourceItem } from '../lib/types';
 import { useToast } from '../components/Toast';
@@ -22,6 +23,7 @@ const FEEDS = [
 const PLATFORMS = ['LinkedIn', 'X', 'YouTube', 'Facebook', 'Instagram', 'General'];
 
 export default function Discover() {
+  const navigate = useNavigate();
   const [feedUrl, setFeedUrl] = useState(FEEDS[0].url);
   const [stories, setStories] = useState<SourceItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -88,8 +90,18 @@ export default function Discover() {
         provider: 'ollama:llama3.2:3b',
       });
       if (res.ok) {
-        toast(`Draft created for ${platform}!`, 'success');
+        toast(res.dedup ? `Existing draft loaded (no duplicate created)` : `Draft created for ${platform}!`, res.dedup ? 'info' : 'success');
         setStories((prev) => prev.filter((s) => s.url !== story.url));
+        // Auto-forward to Studio with the draft data (existing or new)
+        setTimeout(() => navigate('/', {
+          state: {
+            title: res.title || story.title,
+            body: res.body || '',
+            platform: res.platform || platform,
+            image_prompt: res.image_prompt || '',
+            media_url: res.media_url || '',
+          }
+        }), 1500);
       } else {
         toast(res.error || 'Failed to create draft', 'error');
       }

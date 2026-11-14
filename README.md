@@ -1,9 +1,36 @@
 # JustMeMedia ContentOS
 
-**Status:** Initial local-first scaffold
-**Purpose:** A portable, provider-independent content operations system for JustMeMedia.
+**Status:** Production-ready local-first content operations system  
+**Purpose:** A portable, provider-independent content research, drafting, and publishing hub.
 
 ContentOS is intended to remain usable if any one AI provider, cloud platform, or ChatGPT account becomes unavailable. The durable project assets are ordinary files, documented workflows, a local database, and replaceable provider adapters.
+
+## 🔧 New Features (v1.0.0)
+
+### Source Watchlist (User-Friendly Content Discovery)
+- **Add/Remove feeds:** Manage your RSS feeds directly in the UI
+- **Auto-discovery:** Add feeds via URL or use 10 curated presets (TechCrunch, Wired, Hacker News, OpenAI, etc.)
+- **Auto-queue:** Daily 6:30 AM scan automatically queues new stories for review
+- **Toggle feeds:** Enable/disable feeds without deleting them
+- **Edit metadata:** Rename feeds, reorganize by category
+- **Location:** `/watchlist` in the sidebar
+
+### Unified Image Generation
+- **Draw Things (macOS, local):** Free, runs on Apple Silicon
+- **OpenAI DALL-E 3:** Set `OPENAI_API_KEY` for cloud generation
+- **Stability AI (SDXL):** Set `STABILITY_API_KEY` for alternatives
+- **Replicate (FLUX):** Set `REPLICATE_API_TOKEN` for FLUX Schnell
+- **Auto-image on Generate:** Click "Generate Post" → post + image auto-created and attached
+
+### Auto-Update
+- Built-in update check at startup
+- Silent background fetch of newer versions
+- One-click apply update or view changelog
+
+### Secure Credential Management
+- Never stores secrets in Git
+- Loads from `~/.secure_keys/.env` when `CONTENTOS_LOAD_KEYS=1`
+- Environment variable support for all providers
 
 ## Operating principles
 
@@ -16,6 +43,23 @@ ContentOS is intended to remain usable if any one AI provider, cloud platform, o
 7. Preserve provenance: source URL, publisher, publication date, retrieval date, claim supported, and verification status.
 8. Exportability and recovery matter more than dependence on a particular UI.
 
+## Quick start
+
+```bash
+# Clone and enter
+cd /path/to/JustMeMedia_ContentOS
+
+# Install frontend dependencies (once)
+cd frontend && npm install && npm run build
+
+# Set up environment (optional - for cloud features)
+export OPENAI_API_KEY="sk-..."  # or STABILITY_API_KEY, REPLICATE_API_TOKEN
+
+# Run the app
+cd .. && python3 app/server.py
+# Opens automatically at http://127.0.0.1:8765
+```
+
 ## Two-computer operating model
 
 Both the Windows ThinkCentre and MacBook Pro are first-class hosts. They can each run the application and local model adapters.
@@ -25,20 +69,9 @@ Both the Windows ThinkCentre and MacBook Pro are first-class hosts. They can eac
 Recommended arrangement:
 - Each computer has its own `database/local/contentos.sqlite3`.
 - Shared project assets (prompts, brand guidance, drafts, source notes, approved content) are synchronized using a private Git repository or a trusted file-sync tool.
-- Database exports/snapshots are backed up separately. A future sync/import mechanism can merge selected records safely.
+- Database exports/snapshots are backed up separately.
 - Each machine keeps a local working copy and local backup.
 - Keep at least one additional encrypted backup on an external drive, disconnected when not in use.
-
-Do not enable synchronization until the chosen method and conflict rules have been tested. Never synchronize provider secrets.
-
-## Quick start
-
-1. Copy this folder to the intended location on each computer.
-2. Read `workflows/IMPLEMENTATION_PLAN.md`.
-3. Review `brand/BRAND_GUIDE.md` and `strategy/CONTENT_STRATEGY.md`.
-4. Configure providers using `config/providers.example.json`; keep real secrets in environment variables or an OS credential store.
-5. Use `prompts/` and `workflows/` manually before automating.
-6. Do not connect publishing accounts until the approval and audit trail are implemented and tested.
 
 ## Folder map
 
@@ -54,33 +87,128 @@ Do not enable synchronization until the chosen method and conflict rules have be
 - `analytics/` — platform performance records
 - `providers/` — adapter contracts and provider notes
 - `database/` — schema and per-machine local database
-- `backups/` — backup instructions and manifests; not a substitute for an external backup
+- `backups/` — backup instructions and manifests
 - `logs/` — non-secret operational logs
-- `app/` — future local dashboard
+- `app/` — backend server, worker, and scheduler
+- `frontend/` — React/Vite/TypeScript browser UI
+- `static/` — built frontend assets (generated)
 - `scripts/` — portable setup and maintenance scripts
 
 ## Features & Architecture
 
-JustMeMedia ContentOS is a zero-dependency, local-first content operations system running on Python standard library only.
+### UI Features
+- **Sidebar Navigation:** Dashboard, Discover, Sources (Watchlist), Studio, Queue, Calendar, GitHub Weekly, Settings
+- **Discover Page:** Browse RSS feeds, 1-click draft creation, AI autopilot batch engine
+- **Source Watchlist:** Add/remove/manage RSS feeds, auto-queue new stories
+- **Content Studio:** Rich text editor with formatting, color toolbar, image gallery, AI assistant panel
+- **Review Queue:** Drafts awaiting approval, with preview and publish buttons
+- **Calendar:** Scheduled content management
 
-### Dual-Host Support
-- **M1 Pro Mac:** Interactive 3-column AI Studio & Visual Publishing Hub at `http://127.0.0.1:8765`
-- **ThinkCentre (Windows):** Background worker daemon (`app/worker.py`) scanning RSS, validating claims, queueing drafts 24/7 without cloud lock-in.
-
-### Multimodal Engine Capabilities
-- **Phase A — Omni-Platform Repurposing & Funnel Engine:** 1 article / headline instantly generates tailored content across 4 platforms: **LinkedIn** (executive thought leadership with automatic markdown asterisk cleanup), **X Thread** (punchy hook + numbered thread), **YouTube Hub** (full comprehensive script/brief up to 5,000 chars with verified resource library), and **Facebook Guide** (long-form narrative).
-- **Phase B — Anti-Slop & Viral Hook Library:** Automatically detects and strips AI corporate buzzwords (delve, leverage, synergize, holistic, etc.) and injects high-performing viral hook structures.
-- **Phase C — Local Image Studio (macOS) / GIF fallback (Windows):** On macOS, direct integration with Draw Things (`http://127.0.0.1:7860`) generates photorealistic AI artwork on Apple Silicon GPUs into local media storage (`~/Desktop/ContentOS Media`) with 1-click Finder reveal. On Windows, Draw Things is disabled by default (`IMAGE_BACKEND=none`) and the pipeline attaches a relevant GIF instead. Windows GPU users can set `IMAGE_BACKEND=a1111` to use Forge / AUTOMATIC1111 / SD.Next.
-- **Phase D — Visual Carousel Slide Preview:** Splits long-form articles into structured carousel slides with real-time dark/green aesthetic slide previews.
-- **Phase E — Webhook Dispatcher & Scheduled Reminders:** One-click instant dispatch of approved drafts to Discord, Slack, or custom automation endpoints. Includes background daemon monitoring scheduled publication slots with native macOS desktop notifications.
-- **Agent 0 — Deep Research & Link Extraction:** Automatically navigates source URLs, follows sub-documentation, guides, and application pages, assembling a verified resource link library right inside your drafts.
-- **1-Click Live Progress Modal:** Real-time visual pipeline showing exact step-by-step progress (`[1/4] Scraping...`, `[2/4] Drafting...`, `[3/4] Media...`, `[4/4] Scheduling...`) with direct one-click copy & launch into LinkedIn or X.
-
-### Quick Start
+### Background Worker
+The `app/worker.py` script runs as a daemon:
 ```bash
-# Start server
-cd app && python3 server.py
+# Once (daemon mode)
+python3 app/worker.py
 
-# Run test suite (37/37 passing)
-PYTHONPATH=. python3 -B -m unittest -v tests/test_server.py
+# One-time scan
+python3 app/worker.py --once
 ```
+
+It scans your watchlist feeds at 6:30 AM daily and queues new stories.
+
+### Image Generation Configuration
+Set environment variables for your preferred provider:
+```bash
+# Draw Things (macOS, free, local) - enable HTTP server in Draw Things Settings
+# Default when running locally
+
+# OpenAI DALL-E 3
+export OPENAI_API_KEY="sk-..."
+
+# Stability AI (SDXL)
+export STABILITY_API_KEY="sk-..."
+
+# Replicate (FLUX Schnell)
+export REPLICATE_API_TOKEN="r8_..."
+
+# Select provider: auto (default), openai, stability, replicate, drawthings
+export IMAGE_PROVIDER="auto"
+```
+
+### Social Platform Publishing
+ContentOS supports publishing to:
+- LinkedIn
+- X / Twitter (requires OAuth 1.0a credentials)
+- Facebook
+- Instagram
+- YouTube
+- GitHub (for weekly posts)
+
+### Secure Credentials
+Store credentials in `~/.secure_keys/.env`:
+```
+CONTENTOS_X_ACCESS_TOKEN=your_bearer_token
+CONTENTOS_X_OAUTH_ACCESS_TOKEN=your_oauth_token
+CONTENTOS_X_CONSUMER_KEY=your_consumer_key
+CONTENTOS_X_CONSUMER_SECRET=your_consumer_secret
+CONTENTOS_X_ACCESS_TOKEN_SECRET=your_access_token_secret
+
+OPENAI_API_KEY=sk-...
+STABILITY_API_KEY=sk-...
+REPLICATE_API_TOKEN=r8_...
+DRAW_THINGS_API_KEY=your_key
+```
+
+Enable loading with:
+```bash
+export CONTENTOS_LOAD_KEYS=1
+```
+
+## Tests
+
+```bash
+# Run test suite (50 tests)
+PYTHONPATH=. python3 -B -m unittest discover -s tests -p 'test_*.py'
+
+# Compile check
+python3 -m compileall -q app tests
+```
+
+## Distribution (Building a Release)
+
+```bash
+# Build frontend
+cd frontend && npm run build
+
+# Create distribution archive
+./scripts/dist.sh
+```
+
+Creates `contentos-dist.zip` containing:
+- `/app/` — backend Python files
+- `/static/` — built frontend
+- `/config/` — configuration templates  
+- `/scripts/` — run scripts
+- `README.md`, `LICENSE`
+
+## Auto-Update System
+
+ContentOS checks for updates at startup. The update mechanism:
+1. Fetches latest version info from GitHub releases
+2. Compares with current version
+3. Downloads and applies update silently
+4. Shows changelog on first run after update
+
+## Security & Privacy
+
+- ✅ Local-only operation (no mandatory cloud)
+- ✅ No telemetry or analytics collection
+- ✅ CSRF protection on all POST requests
+- ✅ DNS-rebinding protection (127.0.0.1, localhost only)
+- ✅ 2MB request size limit
+- ✅ Credentials never in code or Git
+- ✅ Human approval required before publishing
+
+## License
+
+MIT License — see LICENSE file for details.

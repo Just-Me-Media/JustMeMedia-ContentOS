@@ -2,14 +2,17 @@ export interface Draft {
   id: number;
   title: string;
   body: string;
+  body_html?: string;
   platform: string;
-  status: 'Draft' | 'Approved' | 'Published';
+  status: 'Draft' | 'Approved' | 'Published' | 'Failed';
   image_prompt?: string;
   source_url?: string;
   media_url?: string;
   tags?: string;
   scheduled_for?: string;
   auto_publish?: number;
+  post_id?: string;
+  publish_error?: string;
   created_at?: string;
   updated_at?: string;
   live_url?: string;
@@ -64,4 +67,14 @@ export interface GithubRepo {
   description: string;
   stars: number;
   language: string;
+}
+
+export interface WatchlistItem {
+  id: number;
+  url: string;
+  label: string;
+  category: string;
+  enabled: number;
+  last_checked: string;
+  last_error: string;
 }

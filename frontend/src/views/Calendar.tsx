@@ -18,8 +18,15 @@ export default function Calendar() {
   const todayStr = new Date().toDateString();
 
   const scheduled = drafts.filter((d) => d.scheduled_for);
+  // Deduplicate by source_url (or title+platform fallback) — keep the most recent
+  const deduped = scheduled.reduce((acc, d) => {
+    const key = d.source_url || `${d.title}||${d.platform}`;
+    const existing = acc.get(key);
+    if (!existing || d.id > existing.id) acc.set(key, d);
+    return acc;
+  }, new Map<string, Draft>()).values();
   const postsOn = (y: number, m: number, d: number) =>
-    scheduled.filter((p) => {
+    Array.from(deduped).filter((p) => {
       if (!p.scheduled_for) return false;
       const [date] = p.scheduled_for.split(' ');
       const [py, pm, pd] = date.split('-').map(Number);

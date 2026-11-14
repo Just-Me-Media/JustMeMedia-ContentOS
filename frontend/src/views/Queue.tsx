@@ -1,10 +1,52 @@
 import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
 import type { Draft } from '../lib/types';
 import { useToast } from '../components/Toast';
-import { Search, CheckSquare, Square, CheckCircle2, Trash2, CalendarClock, Inbox, Clock, Check, Download } from 'lucide-react';
+import { Search, CheckSquare, Square, CheckCircle2, Trash2, CalendarClock, Inbox, Clock, Check, Download, Edit3, Loader2, Copy, ExternalLink } from 'lucide-react';
+
+// Where to send the user to compose a post on each platform (manual posting)
+const PLATFORM_COMPOSE: Record<string, { label: string; url: string; prefills?: boolean }> = {
+  X:         { label: 'X / Twitter', url: 'https://x.com/intent/post?text=', prefills: true },
+  LinkedIn:  { label: 'LinkedIn',    url: 'https://www.linkedin.com/feed/?shareActive=true' },
+  Facebook:  { label: 'Facebook',    url: 'https://www.facebook.com/' },
+  Instagram: { label: 'Instagram',   url: 'https://www.instagram.com/' },
+  YouTube:   { label: 'YouTube',     url: 'https://studio.youtube.com/' },
+  GitHub:    { label: 'GitHub',      url: 'https://github.com/' },
+  General:   { label: 'Platform',    url: '' },
+};
+
+function composeUrl(platform: string, body: string): string {
+  const target = PLATFORM_COMPOSE[platform] || PLATFORM_COMPOSE.General;
+  if (!target.url) return '';
+  if (target.prefills) return target.url + encodeURIComponent((body || '').slice(0, 280));
+  return target.url;
+}
+
+async function copyToClipboard(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    // Fallback for older browsers / non-secure contexts
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      return ok;
+    } catch {
+      return false;
+    }
+  }
+}
 
 export default function Queue() {
+  const navigate = useNavigate();
   const [drafts, setDrafts] = useState<Draft[]>([]);
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState<Set<number>>(new Set());
@@ -12,6 +54,7 @@ export default function Queue() {
   const [tab, setTab] = useState<'active' | 'published'>('active');
   const [schedulingId, setSchedulingId] = useState<number | null>(null);
   const [scheduleDate, setScheduleDate] = useState('');
+  const [publishingId, setPublishingId] = useState<number | null>(null);
   const { toast } = useToast();
 
   const handleExport = (id: number) => {
@@ -40,6 +83,13 @@ export default function Queue() {
     if (query && !(d.title + ' ' + d.body).toLowerCase().includes(query.toLowerCase())) return false;
     return true;
   });
+  // Deduplicate by source_url (or title+platform fallback) — keep the most recent
+  const deduped = filtered.reduce((acc, d) => {
+    const key = d.source_url || `${d.title}||${d.platform}`;
+    const existing = acc.get(key);
+    if (!existing || d.id > existing.id) acc.set(key, d);
+    return acc;
+  }, new Map<string, Draft>()).values();
 
   const toggle = (id: number) => {
     const next = new Set(selected);
@@ -63,6 +113,33 @@ export default function Queue() {
       load();
     } catch {
       toast('Failed to schedule', 'error');
+    }
+  };
+
+  const handlePublish = async (id: number) => {
+    setPublishingId(id);
+    try {
+      const res = await api.publishDraft(id);
+      if (res.ok) {
+        toast('Published successfully!', 'success');
+        load();
+      } else {
+        toast(res.error || 'Publish failed', 'error');
+      }
+    } catch (e: any) {
+      toast(e?.message || 'Publish failed', 'error');
+    } finally {
+      setPublishingId(null);
+    }
+  };
+
+  const handleMarkPublished = async (id: number) => {
+    try {
+      await api.markPublished(id);
+      toast('Marked as published', 'success');
+      load();
+    } catch {
+      toast('Failed to mark as published', 'error');
     }
   };
   const bulkDelete = async () => {
@@ -131,24 +208,12 @@ export default function Queue() {
         >
           <Download size={13} /> Export All
         </button>
-        <button
-          onClick={bulkApprove}
-          className="flex items-center gap-1.5 rounded-lg border border-emerald-300 bg-emerald-50 text-emerald-700 px-3 py-1.5 text-[12px] font-semibold hover:bg-emerald-100 transition-colors"
-        >
-          <CheckCircle2 size={13} /> Approve Selected
-        </button>
-        <button
-          onClick={bulkDelete}
-          className="flex items-center gap-1.5 rounded-lg border border-red-200 bg-red-50 text-red-600 px-3 py-1.5 text-[12px] font-semibold hover:bg-red-100 transition-colors"
-        >
-          <Trash2 size={13} /> Delete
-        </button>
       </div>
 
       {/* Queue items */}
       <div className="flex-1 overflow-y-auto p-8">
         <div className="space-y-3 max-w-4xl mx-auto">
-          {filtered.map((d) => (
+          {Array.from(deduped).map((d) => (
             <div key={d.id} className="card p-5 flex gap-4 hover:border-edgehover transition-all">
               <button onClick={() => toggle(d.id)} className="mt-0.5 text-faint hover:text-brand-600">
                 {selected.has(d.id) ? (
@@ -231,12 +296,53 @@ export default function Queue() {
                     </button>
                   </>
                 )}
+
+                {/* ── Manual post helpers (no API needed) ── */}
                 <button
-                  onClick={() => api.publishDraft(d.id).then(load)}
-                  title="Publish now"
-                  className="rounded-lg border border-edge bg-surface text-sub p-2 hover:text-ink hover:bg-raised transition-colors"
+                  onClick={async () => {
+                    const ok = await copyToClipboard(d.body || '');
+                    toast(ok ? 'Copied to clipboard — paste into your platform' : 'Copy failed — select text manually', ok ? 'success' : 'error');
+                  }}
+                  title="Copy post text to clipboard"
+                  className="rounded-lg border border-edge bg-surface text-sub p-2 hover:text-brand-600 hover:border-brand-200 transition-colors"
                 >
-                  <Clock size={16} />
+                  <Copy size={16} />
+                </button>
+                {composeUrl(d.platform, d.body) && (
+                  <a
+                    href={composeUrl(d.platform, d.body)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title="Open compose window on platform"
+                    className="rounded-lg border border-edge bg-surface text-sub p-2 hover:text-brand-600 hover:border-brand-200 transition-colors flex items-center justify-center"
+                  >
+                    <ExternalLink size={16} />
+                  </a>
+                )}
+
+                <button
+                  onClick={() => handlePublish(d.id)}
+                  disabled={publishingId === d.id}
+                  title="Publish now (requires platform credentials)"
+                  className="rounded-lg border border-edge bg-surface text-sub p-2 hover:text-ink hover:bg-raised transition-colors disabled:opacity-50"
+                >
+                  {publishingId === d.id ? <Loader2 size={16} className="animate-spin" /> : <Clock size={16} />}
+                </button>
+                {d.status !== 'Published' && (
+                  <button
+                    onClick={() => handleMarkPublished(d.id)}
+                    title="Mark as published (manual post)"
+                    className="rounded-lg border border-dashed border-edge bg-surface text-faint p-2 hover:text-brand-600 hover:border-brand-200 transition-colors text-[10px] font-semibold"
+                  >
+                    ✓
+                  </button>
+                )}
+                <button
+                  onClick={() => navigate('/', { state: { editId: d.id } })}
+                  title="Edit draft"
+                  className="rounded-lg border border-edge bg-surface text-sub p-2 hover:text-brand-600 hover:border-brand-200 transition-colors"
+                >
+                  <Edit3 size={16} />
                 </button>
                 <button
                   onClick={() => handleExport(d.id)}
