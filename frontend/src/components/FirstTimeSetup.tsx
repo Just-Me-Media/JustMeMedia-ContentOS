@@ -100,22 +100,40 @@ export default function FirstTimeSetup({ onComplete }: { onComplete: () => void 
             </div>
           )}
           {currentStep === 1 && (
-            <div className="text-[13px] text-sub leading-relaxed">
-              <p>✅ Image generation is ready:</p>
-              <ul className="text-sm mt-1 space-y-1">
-                <li><strong>Draw Things (macOS)</strong> - Enable HTTP server in Settings → Free & local</li>
-                <li><strong>Cloud providers</strong> - Add keys in Settings for DALL-E 3, Stability AI, or Replicate</li>
-              </ul>
-              <p className="mt-2">
-                <a 
-                  href="https://developer.twitter.com/en/portal/dashboard" 
-                  target="_blank" 
+            <div className="text-[13px] text-sub leading-relaxed space-y-3">
+              <div>
+                <p className="font-medium text-ink mb-1">🖼 Local image generation (free, macOS)</p>
+                <ul className="space-y-1 ml-1">
+                  <li>
+                    <a
+                      href="https://apps.apple.com/us/app/draw-things-ai-generation/id6444050820"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-brand-500 hover:underline inline-flex items-center gap-1"
+                    >
+                      Download Draw Things from the App Store <ExternalLink size={11} />
+                    </a>
+                  </li>
+                  <li className="text-sub">
+                    Then open Draw Things → <strong>Settings → API Server</strong> → enable on port 7860
+                  </li>
+                </ul>
+              </div>
+              <div>
+                <p className="font-medium text-ink mb-1">☁️ Cloud image providers (optional)</p>
+                <p className="text-sub">Add API keys in Settings for DALL-E 3, Stability AI, or Replicate.</p>
+              </div>
+              <div>
+                <p className="font-medium text-ink mb-1">🐦 Social publishing</p>
+                <a
+                  href="https://developer.twitter.com/en/portal/dashboard"
+                  target="_blank"
                   rel="noopener noreferrer"
                   className="text-brand-500 hover:underline inline-flex items-center gap-1"
                 >
-                  Get X/Twitter API keys <ExternalLink size={12} />
+                  Get X/Twitter API keys <ExternalLink size={11} />
                 </a>
-              </p>
+              </div>
             </div>
           )}
           {currentStep === 2 && (
