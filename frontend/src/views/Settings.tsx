@@ -223,15 +223,18 @@ CONTENTOS_X_ACCESS_TOKEN_SECRET=your_access_token_secret`}
             <h2 className="text-[12px] font-bold uppercase tracking-widest text-faint mb-4 flex items-center gap-2">
               <Shield size={14} /> Security
             </h2>
-            <div className="space-y-4">
-              <label className="flex items-center justify-between text-[13px] text-sub cursor-pointer">
+            <p className="text-[12px] text-faint mb-4">
+              These protections are enforced by the local server and cannot be turned off here.
+            </p>
+            <div className="space-y-3">
+              <div className="flex items-center justify-between text-[13px] text-sub">
                 <span>Require human approval before any post publishes</span>
-                <input type="checkbox" defaultChecked className="accent-brand-500 w-4 h-4" />
-              </label>
-              <label className="flex items-center justify-between text-[13px] text-sub cursor-pointer">
+                <span className="flex items-center gap-1 text-emerald-600 text-[11px] font-semibold"><CheckCircle size={14} /> Enforced</span>
+              </div>
+              <div className="flex items-center justify-between text-[13px] text-sub">
                 <span>Localhost-only host guard (127.0.0.1)</span>
-                <input type="checkbox" defaultChecked className="accent-brand-500 w-4 h-4" />
-              </label>
+                <span className="flex items-center gap-1 text-emerald-600 text-[11px] font-semibold"><CheckCircle size={14} /> Enforced</span>
+              </div>
               <div className="border-t border-edge pt-4 mt-4">
                 <h3 className="text-[12px] font-bold uppercase tracking-widest text-faint mb-2">Credential Storage</h3>
                 <p className="text-[13px] text-sub leading-relaxed">
