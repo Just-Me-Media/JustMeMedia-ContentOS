@@ -40,3 +40,39 @@ jobs:
           PYTHONPATH: .
         run: python -B -m unittest discover -s tests -p 'test_*.py' -v
 
+  frontend:
+    name: Frontend build & route smoke test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Assert committed bundle exposes every documented route
+        # Regression guard: e81e921 removed /studio, /calendar and /github
+        # from App.tsx while CI stayed green because it never built the UI.
+        run: |
+          BUNDLE=$(ls static/assets/*.js)
+          for route in / /discover /watchlist /studio /queue /calendar /github /settings; do
+            if ! grep -q "\"$route\"" "$BUNDLE"; then
+              echo "::error::Route $route missing from built bundle"
+              exit 1
+            fi
+          done
+          echo "All documented routes present in $BUNDLE"
+

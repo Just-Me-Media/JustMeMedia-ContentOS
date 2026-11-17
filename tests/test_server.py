@@ -641,6 +641,29 @@ class TestGitHubTrending(unittest.TestCase):
         self.assertNotIn("sample", result[0])
 
 
+    def test_sample_flag_persists_through_bundle(self):
+        """Offline sample data must be marked all the way into generated posts."""
+        from app.server import store_github_repos, generate_weekly_github_bundle
+        repos = [{"full_name": "sample/repo", "url": "https://github.com/sample/repo",
+                  "description": "placeholder", "stars": 1, "language": "Python",
+                  "sample": True}]
+        with self._temp_db():
+            store_github_repos(repos, "General")
+            bundle = generate_weekly_github_bundle("General", "LinkedIn")
+            self.assertTrue(bundle["ok"])
+            self.assertTrue(bundle["sample"])
+            self.assertTrue(all(r["sample"] for r in bundle["repos"]))
+
+    def test_live_repos_are_not_flagged_sample(self):
+        from app.server import store_github_repos, generate_weekly_github_bundle
+        repos = [{"full_name": "live/repo", "url": "https://github.com/live/repo",
+                  "description": "real", "stars": 5, "language": "Python"}]
+        with self._temp_db():
+            store_github_repos(repos, "General")
+            bundle = generate_weekly_github_bundle("General", "LinkedIn")
+            self.assertFalse(bundle["sample"])
+
+
 class TestTimezoneConsistency(unittest.TestCase):
     """Regression: UTC and local date must not disagree on day-keyed records."""
 

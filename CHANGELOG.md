@@ -5,6 +5,14 @@ All notable changes to JustMeMedia ContentOS will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-11-17
+
+### Fixed
+- GitHub Weekly: offline sample data is now visibly labeled in the UI and cannot generate a post until live data is fetched; the `sample` flag persists through storage and the generated bundle.
+- Auto-update: 404 ("no releases published") is no longer reported as a failed check.
+- Timezone: GitHub snapshots and weekly lookups share one local-date clock.
+- Frontend: restored Studio / Calendar / GitHub Weekly / Sources routes; cache headers prevent stale UI after updates.
+
 ## [1.0.0] - 2026-11-13
 
 ### Added
