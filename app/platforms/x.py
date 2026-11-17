@@ -229,13 +229,14 @@ def publish(draft_id: int, title: str, body: str,
                              error="X/Twitter credentials not configured. Set CONTENTOS_X_CLIENT_ID + "
                                    "CONTENTOS_X_CLIENT_SECRET (OAuth 2.0) or OAuth 1.0a keys.")
 
-    tweet_text = body
-    if title:
-        tweet_text = f"{title}\n\n{body}"
-
-    # Truncate to 280 chars
-    if len(tweet_text) > 280:
-        tweet_text = tweet_text[:277] + "..."
+    # Use the SAME canonical formatter as /api/format-x and run_roundtable().
+    # Previously this did tweet_text[:277] + "..." which ignored X's t.co URL
+    # accounting (23 chars per link) and could cut a URL or hashtag mid-token.
+    from app.server import format_for_x
+    tweet_text = format_for_x(body if not title else f"{title}\n\n{body}", 280)
+    if not tweet_text:
+        return PublishResult(ok=False, platform="x",
+                             error="Post is empty after formatting for X.")
 
     payload: dict = {"text": tweet_text}
 

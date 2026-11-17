@@ -60,7 +60,7 @@ ALLOWED_HOSTNAMES = frozenset({"127.0.0.1", "localhost", "::1"})
 MAX_BODY_BYTES = 2_000_000
 
 # Application version (bump for releases)
-CONTENTOS_VERSION = "1.0.1"
+CONTENTOS_VERSION = "1.0.2"
 GITHUB_REPO = "Just-Me-Media/JustMeMedia-ContentOS"
 
 _ENV_KEY_FALLBACK = frozenset({
@@ -209,35 +209,6 @@ def connect_db() -> sqlite3.Connection:
     if "body_html" not in cols:
         conn.execute("ALTER TABLE drafts ADD COLUMN body_html TEXT NOT NULL DEFAULT ''")
 
-    # 2. Content items & versions (ThinkCentre relational schema)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS content_items (
-            id TEXT PRIMARY KEY,
-            title TEXT NOT NULL,
-            pillar TEXT,
-            status TEXT NOT NULL DEFAULT 'IDEA',
-            audience TEXT,
-            objective TEXT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            current_version INTEGER NOT NULL DEFAULT 1
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS content_versions (
-            id TEXT PRIMARY KEY,
-            content_id TEXT NOT NULL REFERENCES content_items(id),
-            version INTEGER NOT NULL,
-            platform TEXT,
-            body TEXT NOT NULL,
-            visual_brief TEXT,
-            created_at TEXT NOT NULL,
-            created_by TEXT,
-            model_info TEXT,
-            UNIQUE (content_id, version)
-        )
-    """)
-
     # 3. Sources table (Research intake & provenance)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS sources (
@@ -251,19 +222,12 @@ def connect_db() -> sqlite3.Connection:
         )
     """)
 
-    # 4. Claims table
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS claims (
-            id TEXT PRIMARY KEY,
-            content_id TEXT REFERENCES content_items(id),
-            source_id TEXT REFERENCES sources(id),
-            claim_text TEXT NOT NULL,
-            verified INTEGER NOT NULL DEFAULT 0,
-            notes TEXT
-        )
-    """)
+    # NOTE: the former content_items / content_versions / claims tables were
+    # never written by the app or worker (drafts + draft_versions + sources are
+    # the real model) and were removed. They have no migration path here; any
+    # legacy tables in an existing DB are harmless and simply left untouched.
 
-    # 5. Approvals audit trail
+    # Approvals audit trail
     conn.execute("""
         CREATE TABLE IF NOT EXISTS approvals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2286,6 +2250,56 @@ def start_daily_scrape_daemon() -> None:
     t.start()
 
 
+_URL_IN_TEXT = re.compile(r"https?://\S+", re.IGNORECASE)
+
+
+def _x_char_weight(ch: str) -> int:
+    """X counts most non-ASCII code points as 2, a few ranges as 1."""
+    cp = ord(ch)
+    if cp <= 0x10FF or 0x2000 <= cp <= 0x200D or 0x2010 <= cp <= 0x201F or 0x2032 <= cp <= 0x2037:
+        return 1
+    return 2
+
+
+def x_weighted_len(text: str) -> int:
+    """X/Twitter's weighted character count.
+
+    Every URL counts as 23 characters regardless of its real length (t.co
+    wrapping), and emoji/CJK count as 2. This is the number that must stay
+    <= 280 — not naive ``len()``.
+    """
+    if not text:
+        return 0
+    total = 0
+    for part in _URL_IN_TEXT.split(text):
+        if part:
+            total += sum(_x_char_weight(ch) for ch in part)
+    # One URL (23) for each split separator occurrence.
+    total += 23 * (len(_URL_IN_TEXT.findall(text)))
+    return total
+
+
+def x_effective_len(text: str) -> int:
+    """Conservative length: satisfies BOTH the platform counter and raw len.
+
+    Weighted count is smaller than raw for long URLs; raw is smaller for
+    emoji. Taking the max keeps a post within 280 by either measure.
+    """
+    return max(len(text or ""), x_weighted_len(text or ""))
+
+
+def _truncate_for_x(text: str, budget: int) -> str:
+    """Trim text with an ellipsis until its effective length fits budget."""
+    if budget <= 0:
+        return ""
+    if x_effective_len(text) <= budget:
+        return text
+    end = text
+    while end and x_effective_len(end.rstrip() + "…") > budget:
+        end = end[:-1]
+    return end.rstrip() + "…" if end else ""
+
+
 def format_as_thread(post_text: str, max_tweet_len: int = 270) -> list[str]:
     """Split a post into numbered tweet segments for X.
     Guarantees every single tweet in the list is strictly <= max_tweet_len (270 chars).
@@ -2316,11 +2330,11 @@ def format_as_thread(post_text: str, max_tweet_len: int = 270) -> list[str]:
         for s in s_list:
             s_stripped = s.strip()
             if s_stripped:
-                if len(s_stripped) > 180:
+                if x_effective_len(s_stripped) > 180:
                     words = s_stripped.split()
                     cur = []
                     for w in words:
-                        if len(" ".join(cur + [w])) > 180:
+                        if x_effective_len(" ".join(cur + [w])) > 180:
                             sentences.append(" ".join(cur))
                             cur = [w]
                         else:
@@ -2336,7 +2350,7 @@ def format_as_thread(post_text: str, max_tweet_len: int = 270) -> list[str]:
     for s in sentences:
         if not current:
             current = s
-        elif len(current) + len(s) + 1 <= budget:
+        elif x_effective_len(current) + x_effective_len(s) + 1 <= budget:
             current += " " + s
         else:
             raw_tweets.append(current.strip())
@@ -2347,14 +2361,13 @@ def format_as_thread(post_text: str, max_tweet_len: int = 270) -> list[str]:
     total = len(raw_tweets)
     if total <= 1:
         t = raw_tweets[0] if raw_tweets else clean_text
-        return [t[:max_tweet_len]]
+        return [_truncate_for_x(t, max_tweet_len)]
 
     final_tweets = []
     for i, tw in enumerate(raw_tweets):
         prefix = f"{i+1}/{total}\n\n"
-        tweet_body = tw
-        if len(prefix + tweet_body) > max_tweet_len:
-            tweet_body = tweet_body[:max_tweet_len - len(prefix) - 1] + "…"
+        budget = max_tweet_len - x_effective_len(prefix)
+        tweet_body = _truncate_for_x(tw, budget)
         final_tweets.append(prefix + tweet_body)
     return final_tweets
 
@@ -2372,11 +2385,11 @@ def format_for_x(text: str, max_chars: int = 280) -> str:
     cleaned = re.sub(r"(?<!\*)\*(?!\*)(.*?)(?<!\*)\*(?!\*)", r"\1", cleaned)
     cleaned = re.sub(r"^###\s+", "", cleaned, flags=re.MULTILINE)
     
-    if len(cleaned.strip()) <= max_chars:
+    if x_effective_len(cleaned.strip()) <= max_chars:
         return cleaned.strip()
-    
+
     urls = re.findall(r"https?://\S+", cleaned)
-    primary_url = urls[0].rstrip(".,;)") if urls else ""
+    primary_url = urls[0].rstrip(".,;):") if urls else ""
     hashtags = re.findall(r"#\w+", cleaned)
     tags_str = " ".join(hashtags[:2]) if hashtags else ""
 
@@ -2387,23 +2400,15 @@ def format_for_x(text: str, max_chars: int = 280) -> str:
         prose = prose.replace(h, "")
     prose = re.sub(r"\s+", " ", prose).strip()
 
-    url_len = len(primary_url) if primary_url else 0
-    tag_len = len(tags_str) if tags_str else 0
-    prose_budget = max_chars - (url_len + 2 if url_len else 0) - (tag_len + 2 if tag_len else 0)
-    if prose_budget < 50 and primary_url:
-        # X t.co link takes ~23 chars natively, ensure prose has space
-        prose_budget = 140
+    # X counts every URL as 23 chars regardless of its real length (t.co).
+    url_cost = 23 if primary_url else 0
+    tag_cost = x_effective_len(tags_str) if tags_str else 0
+    prose_budget = max_chars - url_cost - tag_cost - 4  # newlines/separators
+    if prose_budget < 60 and primary_url:
+        prose_budget = min(140, max_chars - url_cost - 4)
+    prose_budget = max(prose_budget, 20)
 
-    if len(prose) > prose_budget:
-        cut = prose[:prose_budget]
-        last_punct = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "))
-        if last_punct > 50:
-            condensed = cut[:last_punct + 1].strip()
-        else:
-            last_sp = cut.rfind(" ")
-            condensed = (cut[:last_sp] if last_sp > 40 else cut).strip() + "…"
-    else:
-        condensed = prose
+    condensed = _truncate_for_x(prose, prose_budget) if x_effective_len(prose) > prose_budget else prose
 
     parts = [condensed]
     if primary_url:
@@ -2412,13 +2417,22 @@ def format_for_x(text: str, max_chars: int = 280) -> str:
         parts.append(tags_str)
 
     res = "\n\n".join(p for p in parts if p)
-    if len(res) > max_chars and not primary_url:
-        res = res[:max_chars - 1] + "…"
+    if x_effective_len(res) > max_chars:
+        # Drop hashtags first, then trim prose; always keep the link last.
+        parts = [condensed]
+        if primary_url:
+            parts.append(primary_url)
+        res = "\n\n".join(p for p in parts if p)
+        if x_effective_len(res) > max_chars:
+            res = _truncate_for_x(res, max_chars)
     return res
 
 
-def format_as_carousel(title: str, post_text: str) -> list[dict]:
-    """Convert post into multi-slide carousel outlines for LinkedIn or Instagram."""
+def format_as_carousel(title: str, post_text: str, handle: str = "@JustMeMedia") -> list[dict]:
+    """Convert post into multi-slide carousel outlines for LinkedIn or Instagram.
+
+    ``handle`` is configurable so the closing CTA is not hardcoded to one brand.
+    """
     paragraphs = [p.strip() for p in post_text.split("\n\n") if p.strip()]
     slides = [{"slide": 1, "heading": "HOOK", "body": title}]
     for i, p in enumerate(paragraphs[:5], start=2):
@@ -2426,7 +2440,13 @@ def format_as_carousel(title: str, post_text: str) -> list[dict]:
         heading = lines[0][:40] if len(lines) > 1 else f"KEY POINT {i-1}"
         body = "\n".join(lines[1:]) if len(lines) > 1 else p
         slides.append({"slide": i, "heading": heading, "body": body})
-    slides.append({"slide": len(slides) + 1, "heading": "TAKEAWAY", "body": "Follow @JustMeMedia for daily cutting-edge insights."})
+    cta = (handle or "").strip()
+    if cta and not cta.startswith("@"):
+        cta = "@" + cta
+    slides.append({
+        "slide": len(slides) + 1, "heading": "TAKEAWAY",
+        "body": f"Follow {cta} for daily cutting-edge insights." if cta else "Follow for daily cutting-edge insights.",
+    })
     return slides
 
 
@@ -3007,21 +3027,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(rows)
                 return
 
-            if path == "/api/content-items":
-                with db() as conn:
-                    rows = [dict(r) for r in conn.execute("SELECT * FROM content_items ORDER BY updated_at DESC")]
-                self.send_json(rows)
-                return
-
             if path == "/api/sources":
                 with db() as conn:
                     rows = [dict(r) for r in conn.execute("SELECT * FROM sources ORDER BY retrieved_at DESC")]
-                self.send_json(rows)
-                return
-
-            if path == "/api/claims":
-                with db() as conn:
-                    rows = [dict(r) for r in conn.execute("SELECT * FROM claims ORDER BY id DESC")]
                 self.send_json(rows)
                 return
 
@@ -3468,7 +3476,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/format-carousel":
                 title = string_field(payload, "title") or "Key Insights"
                 text = string_field(payload, "text")
-                slides = format_as_carousel(title, text)
+                handle = string_field(payload, "handle") or os.environ.get("CONTENTOS_BRAND_HANDLE", "@JustMeMedia")
+                slides = format_as_carousel(title, text, handle)
                 self.send_json({"ok": True, "slides": slides, "count": len(slides)})
                 return
 
@@ -4079,21 +4088,6 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 log_activity("draft_created", "draft", draft_id, f"Created draft: {title[:60]}")
                 self.send_json({"ok": True, "id": draft_id, "scheduled_for": scheduled_for}, 201)
-                return
-
-            # Save content items
-            if path == "/api/content-items":
-                item_id = string_field(payload, "id") or f"ci_{now_iso()[:10]}_{os.urandom(3).hex()}"
-                title = string_field(payload, "title")
-                if not title:
-                    raise ApiError(400, "Title is required.")
-                stamp = now_iso()
-                with db() as conn:
-                    conn.execute(
-                        "INSERT INTO content_items(id, title, pillar, status, audience, objective, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?)",
-                        (item_id, title, string_field(payload, "pillar"), "IDEA", string_field(payload, "audience"), string_field(payload, "objective"), stamp, stamp)
-                    )
-                self.send_json({"ok": True, "id": item_id}, 201)
                 return
 
             # Save sources

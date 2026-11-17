@@ -5,6 +5,13 @@ All notable changes to JustMeMedia ContentOS will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] - 2026-11-17
+
+### Fixed
+- **X formatting unified:** a single weighted-length counter (URLs = 23 chars, emoji = 2) now drives `format_for_x`, `format_as_thread` and the X publish adapter. No more naive `[:277]` truncation that could cut a URL or hashtag mid-token.
+- **Dead schema removed:** `content_items` / `content_versions` / `claims` tables and their unused API endpoints were removed (nothing wrote to them; `drafts` + `draft_versions` + `sources` are the real model), along with the unreferenced legacy `server.windows.py` / `server.head.py` snapshots that duplicated them.
+- **Carousel CTA configurable:** `format_as_carousel()` accepts a `handle` (env `CONTENTOS_BRAND_HANDLE`), replacing the hardcoded `@JustMeMedia`.
+
 ## [1.0.1] - 2026-11-17
 
 ### Fixed
