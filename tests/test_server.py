@@ -604,6 +604,130 @@ class TestGitHubTrending(unittest.TestCase):
         self.assertIsInstance(result, list)
         self.assertGreater(len(result), 0)
 
+    def test_offline_fallback_is_labeled_sample(self):
+        """When the API is unreachable, returned data must be marked as sample."""
+        import app.server as srv
+        real_urlopen = srv.urllib.request.urlopen
+        srv.urllib.request.urlopen = lambda *a, **k: (_ for _ in ()).throw(OSError("offline"))
+        try:
+            result = srv.fetch_github_trending("all", "python", 7)
+        finally:
+            srv.urllib.request.urlopen = real_urlopen
+        self.assertGreater(len(result), 0)
+        self.assertTrue(all(r.get("sample") is True for r in result))
+
+    def test_live_api_response_is_parsed(self):
+        """A successful /search/repositories response maps to result dicts."""
+        import io
+        import app.server as srv
+        payload = {"items": [
+            {"full_name": "acme/newtool", "html_url": "https://github.com/acme/newtool",
+             "description": "A new tool", "stargazers_count": 321, "language": "Python"},
+            {"full_name": "", "html_url": "https://github.com/bad", "stargazers_count": 1},
+        ]}
+        class FakeResp:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return json.dumps(payload).encode("utf-8")
+        real_urlopen = srv.urllib.request.urlopen
+        srv.urllib.request.urlopen = lambda *a, **k: FakeResp()
+        try:
+            result = srv.fetch_github_trending("all", "python", 7)
+        finally:
+            srv.urllib.request.urlopen = real_urlopen
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["full_name"], "acme/newtool")
+        self.assertEqual(result[0]["stars"], 321)
+        self.assertNotIn("sample", result[0])
+
+
+class TestTimezoneConsistency(unittest.TestCase):
+    """Regression: UTC and local date must not disagree on day-keyed records."""
+
+    @contextmanager
+    def _temp_db(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            orig = s.DB_PATH
+            s.DB_PATH = Path(tmp_dir) / "contentos.db"
+            try:
+                yield
+            finally:
+                s.DB_PATH = orig
+
+    def test_local_date_helper_is_local_not_utc(self):
+        self.assertEqual(s.local_date_str(), s.datetime.now().strftime("%Y-%m-%d"))
+
+    def test_store_and_lookup_share_clock_under_tz_mismatch(self):
+        """Force UTC date to the next day; stored repos must still be found."""
+        from app.server import store_github_repos, get_weekly_top_10
+        real_now_iso = s.now_iso
+        # Simulate an EST-like evening: UTC has rolled to the next day.
+        s.now_iso = lambda: "2099-01-01T02:00:00+00:00"
+        try:
+            with self._temp_db():
+                repos = [{"full_name": "o/r", "url": "https://github.com/o/r",
+                          "description": "d", "stars": 9, "language": "Python"}]
+                self.assertEqual(store_github_repos(repos, "General"), 1)
+                self.assertEqual(len(get_weekly_top_10("General", "LinkedIn")), 1)
+        finally:
+            s.now_iso = real_now_iso
+
+
+class TestCacheHeaders(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.orig_db = s.DB_PATH
+        s.DB_PATH = Path(self.tmp.name) / "contentos.db"
+        s.connect_db().close()
+        from http.server import ThreadingHTTPServer
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), s.Handler)
+        self.port = self.server.server_address[1]
+        self.thread = __import__("threading").Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        s.DB_PATH = self.orig_db
+        self.tmp.cleanup()
+
+    def _header(self, path, name):
+        with urlopen(f"http://127.0.0.1:{self.port}{path}", timeout=5) as resp:
+            return resp.headers.get(name)
+
+    def test_html_shell_is_no_cache(self):
+        self.assertIn("no-cache", self._header("/", "Cache-Control"))
+
+    def test_api_response_is_no_cache(self):
+        self.assertIn("no-cache", self._header("/api/status", "Cache-Control"))
+
+    def test_fingerprinted_asset_is_immutable(self):
+        # Use a real built asset so the request returns 200 through _send.
+        assets = Path(__file__).resolve().parents[1] / "static" / "assets"
+        js_files = list(assets.glob("*.js"))
+        self.assertTrue(js_files, "no built JS asset found — run npm run build")
+        with urlopen(f"http://127.0.0.1:{self.port}/assets/{js_files[0].name}", timeout=5) as resp:
+            self.assertIn("immutable", resp.headers.get("Cache-Control"))
+
+
+class TestUpdateCheck(unittest.TestCase):
+    def test_no_release_is_not_reported_as_failure(self):
+        import io
+        import app.server as srv
+        def raise_404(*a, **k):
+            from email.message import Message
+            raise HTTPError("http://x", 404, "Not Found", Message(), io.BytesIO(b""))
+        real_urlopen = srv.urllib.request.urlopen
+        srv.urllib.request.urlopen = raise_404
+        try:
+            result = srv.check_for_update()
+        finally:
+            srv.urllib.request.urlopen = real_urlopen
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["up_to_date"])
+        self.assertFalse(result["has_release"])
+        self.assertIn("No published releases", result["note"])
+
 
 class TestChatAssistant(unittest.TestCase):
     def test_parse_well_formed_sections(self):

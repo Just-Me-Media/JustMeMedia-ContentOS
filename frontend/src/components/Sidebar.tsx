@@ -1,13 +1,17 @@
 import { useState } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
-import { LayoutDashboard, Compass, Inbox, Settings, PanelLeftClose, PanelLeft, Plus } from 'lucide-react';
+import { LayoutDashboard, Compass, Wand2, Inbox, CalendarDays, Flame, Rss, Settings, PanelLeftClose, PanelLeft, Plus } from 'lucide-react';
 import clsx from 'clsx';
 import { ToastProvider } from './Toast';
 
 const NAV = [
   { to: '/', icon: LayoutDashboard, label: 'Dashboard', end: true },
   { to: '/discover', icon: Compass, label: 'Discover' },
+  { to: '/watchlist', icon: Rss, label: 'Sources' },
+  { to: '/studio', icon: Wand2, label: 'Studio' },
   { to: '/queue', icon: Inbox, label: 'Queue' },
+  { to: '/calendar', icon: CalendarDays, label: 'Calendar' },
+  { to: '/github', icon: Flame, label: 'GitHub Weekly' },
   { to: '/settings', icon: Settings, label: 'Settings' },
 ];
 
@@ -44,7 +48,7 @@ export default function Sidebar() {
 
           <div className="px-3 pb-3">
             <button
-              onClick={() => navigate('/queue')}
+              onClick={() => navigate('/studio')}
               className="w-full flex items-center justify-center gap-2 rounded-lg bg-brand-500 text-white px-3 py-2 text-[13px] font-semibold hover:bg-brand-600 transition-colors shadow-sm"
             >
               <Plus size={15} /> {!collapsed && 'New Post'}

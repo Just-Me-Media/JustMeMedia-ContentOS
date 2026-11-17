@@ -24,7 +24,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html import unescape as html_unescape
 from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -437,6 +437,17 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def local_date_str() -> str:
+    """Local calendar date (YYYY-MM-DD) for day-keyed records and scheduling.
+
+    The scheduler, optimal slots and scrape times all operate in local time, so
+    any record that is later compared against a local-time slot must use the
+    same clock. Using ``now_iso()[:10]`` (UTC) here made evening entries in
+    negative-UTC-offset zones land on the next day and vanish from lookups.
+    """
+    return datetime.now().strftime("%Y-%m-%d")
+
+
 def get_pending_posts(platform: str = None) -> list[dict]:
     """Fetch approved posts ready for Hermes to publish (pending status).
 
@@ -710,6 +721,13 @@ def check_for_update() -> dict:
     except urllib.error.HTTPError as exc:
         if exc.status == 403:
             return {"ok": True, "current_version": CONTENTOS_VERSION, "latest_version": CONTENTOS_VERSION, "up_to_date": True, "note": "API limit reached"}
+        if exc.status == 404:
+            # No published releases yet — this is normal for a fresh/private
+            # repo, not an error. Be explicit so the UI can say so honestly.
+            return {"ok": True, "current_version": CONTENTOS_VERSION,
+                    "latest_version": CONTENTOS_VERSION, "up_to_date": True,
+                    "has_release": False,
+                    "note": "No published releases found — automatic update checks are unavailable"}
         return {"ok": True, "current_version": CONTENTOS_VERSION, "latest_version": CONTENTOS_VERSION, "up_to_date": True, "note": f"Update check failed: {exc.status}"}
     except Exception as exc:
         return {"ok": True, "current_version": CONTENTOS_VERSION, "latest_version": CONTENTOS_VERSION, "up_to_date": True, "note": str(exc)}
@@ -2527,53 +2545,105 @@ GITHUB_API_BASE = "https://api.github.com"
 
 
 def fetch_github_trending(category: str = "all", language: str = "", days: int = 7) -> list[dict]:
-    """Fetch trending GitHub repos via the public trending RSS proxy or fallback.
+    """Fetch trending GitHub repos via the public REST API.
 
-    Uses https://github.com/trending/{lang}?since=weekly which returns a
-    JavaScript-rendered page. Falls back to a curated list if the site
-    layout changes.
+    Uses ``/search/repositories`` sorted by stars with a recent ``created:``
+    filter to approximate a "trending this week" list. No authentication is
+    required (unauthenticated calls are rate-limited to 60/hour); set
+    ``CONTENTOS_GITHUB_TOKEN`` to raise the limit. A curated list is used only
+    when the API is unreachable, and is labeled as sample data so a post is
+    never published from stale numbers without the operator knowing.
 
     Args:
-        category: language filter (e.g. 'python', 'rust') or 'all' for general.
-        language: optional language filter for the trending page.
-        days: 1, 7 (default), or 30.
+        category: kept for API compatibility (search is language-based).
+        language: language filter (e.g. 'python', 'rust') or '' for all.
+        days: window in days for the ``created:`` filter (1, 7, or 30).
 
     Returns:
-        List of dicts with keys: full_name, url, description, stars, language
+        List of dicts with keys: full_name, url, description, stars, language.
     """
-    # Fallback list of known trending repos (updated weekly manually or via script)
+    results: list[dict] = []
+    try:
+        since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+        query = f"created:>{since}"
+        if language and language.lower() != "all":
+            query += f" language:{language}"
+        params = urllib.parse.urlencode({
+            "q": query, "sort": "stars", "order": "desc", "per_page": 10,
+        })
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "JustMeMediaContentOS/1.0",
+        }
+        token = os.environ.get("CONTENTOS_GITHUB_TOKEN", "").strip()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        req = urllib.request.Request(
+            f"{GITHUB_API_BASE}/search/repositories?{params}", headers=headers
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+        for item in data.get("items", [])[:10]:
+            full_name = item.get("full_name", "")
+            html_url = item.get("html_url", "")
+            if not full_name or not html_url:
+                continue
+            results.append({
+                "full_name": full_name,
+                "url": html_url,
+                "description": (item.get("description") or "")[:500],
+                "stars": int(item.get("stargazers_count") or 0),
+                "language": item.get("language") or "Unknown",
+            })
+    except Exception:
+        results = []
+
+    if results:
+        return results
+
+    # Offline fallback: labeled sample data so callers can warn the user.
+    return _sample_github_repos(language)
+
+
+def _sample_github_repos(language: str = "") -> list[dict]:
+    """Curated illustrative repos used only when the GitHub API is unavailable.
+
+    Star counts are approximate snapshots, not live data. Every entry carries
+    ``sample: True`` so the UI can disclose that the list is not live.
+    """
     fallbacks = {
         "python": [
-            {"full_name": "llm-hub/llm-hub", "url": "https://github.com/llm-hub/llm-hub", "description": "LLM Hub: Your AI gateway", "stars": 12400, "language": "Python"},
-            {"full_name": "datapane/pandas-ai", "url": "https://github.com/datapane/pandas-ai", "description": "LLM-driven data analysis", "stars": 5200, "language": "Python"},
-            {"full_name": "microsoft/semantic-kernel", "url": "https://github.com/microsoft/semantic-kernel", "description": "Build AI apps with natural language", "stars": 48000, "language": "C#"},
-            {"full_name": "openai/openai-cookbook", "url": "https://github.com/openai/openai-cookbook", "description": "Recipes", "stars": 22000, "language": "Python"},
             {"full_name": "huggingface/transformers", "url": "https://github.com/huggingface/transformers", "description": "State-of-the-art NLP", "stars": 105000, "language": "Python"},
             {"full_name": "pytorch/pytorch", "url": "https://github.com/pytorch/pytorch", "description": "Deep learning framework", "stars": 210000, "language": "Python"},
-            {"full_name": "scikit-learn/scikit-learn", "url": "https://github.com/scikit-learn/scikit-learn", "description": "Machine learning library", "stars": 58000, "language": "Python"},
             {"full_name": "pandas-dev/pandas", "url": "https://github.com/pandas-dev/pandas", "description": "Data analysis ecosystem", "stars": 45000, "language": "Python"},
             {"full_name": "django/django", "url": "https://github.com/django/django", "description": "Web framework", "stars": 78000, "language": "Python"},
+            {"full_name": "scikit-learn/scikit-learn", "url": "https://github.com/scikit-learn/scikit-learn", "description": "Machine learning library", "stars": 58000, "language": "Python"},
             {"full_name": "psf/requests", "url": "https://github.com/psf/requests", "description": "HTTP library", "stars": 62000, "language": "Python"},
+            {"full_name": "microsoft/semantic-kernel", "url": "https://github.com/microsoft/semantic-kernel", "description": "Build AI apps with natural language", "stars": 48000, "language": "C#"},
+            {"full_name": "openai/openai-cookbook", "url": "https://github.com/openai/openai-cookbook", "description": "Recipes", "stars": 22000, "language": "Python"},
         ],
         "javascript": [
-            {"full_name": "vercel/next.js", "url": "https://github.com/vercel/next.js", "description": "The React Framework", "stars": 160000, "language": "TypeScript"},
             {"full_name": "facebook/react", "url": "https://github.com/facebook/react", "description": "JavaScript library", "stars": 230000, "language": "JavaScript"},
-            {"full_name": "angular/angular", "url": "https://github.com/angular/angular", "description": "One framework for mobile", "stars": 83000, "language": "TypeScript"},
-            {"full_name": "eslint/eslint", "url": "https://github.com/eslint/eslint", "description": "JavaScript linter", "stars": 26000, "language": "JavaScript"},
+            {"full_name": "vercel/next.js", "url": "https://github.com/vercel/next.js", "description": "The React Framework", "stars": 160000, "language": "TypeScript"},
             {"full_name": "nodejs/node", "url": "https://github.com/nodejs/node", "description": "Node.js runtime", "stars": 108000, "language": "C++"},
+            {"full_name": "angular/angular", "url": "https://github.com/angular/angular", "description": "One framework for mobile", "stars": 83000, "language": "TypeScript"},
         ],
         "rust": [
             {"full_name": "rust-lang/rust", "url": "https://github.com/rust-lang/rust", "description": "The Rust programming language", "stars": 110000, "language": "Rust"},
             {"full_name": "tokio-rs/tokio", "url": "https://github.com/tokio-rs/tokio", "description": "Async runtime", "stars": 26000, "language": "Rust"},
-        ]
+        ],
     }
-    lang = language.lower() if language.lower() in fallbacks else "all"
-    return fallbacks.get(lang, fallbacks["python"][:10])
+    lang = language.lower() if language.lower() in fallbacks else "python"
+    sample = [dict(r, sample=True) for r in fallbacks[lang][:10]]
+    return sample
 
 
 def store_github_repos(repos: list[dict], category: str = "General") -> int:
     """Store a batch of repos in the daily snapshot table."""
-    stamp = now_iso()[:10]  # date only
+    # Use the SAME local-date clock as get_weekly_top_10() and the scheduler.
+    # previously this used now_iso()[:10] (UTC), which disagrees with local
+    # date in the evening for negative UTC offsets and hid stored repos.
+    stamp = local_date_str()
     stored = 0
     with db() as conn:
         for r in repos:
@@ -2588,7 +2658,7 @@ def store_github_repos(repos: list[dict], category: str = "General") -> int:
 
 def get_weekly_top_10(category: str = "General", platform: str = "LinkedIn") -> list[dict]:
     """Get the top 10 repos of the current week by stars gained (7-day window)."""
-    week_start = datetime.now().strftime("%Y-%m-%d")
+    week_start = local_date_str()
     with db() as conn:
         cur = conn.execute(
             "SELECT * FROM github_repos WHERE category = ? AND fetched_at = ? ORDER BY stars DESC LIMIT 10",
@@ -2653,12 +2723,20 @@ def _load_html() -> str:
 
 class Handler(BaseHTTPRequestHandler):
     def _send(self, raw: bytes, status: int = 200, content_type: str = "text/html; charset=utf-8", extra_headers: dict | None = None) -> None:
+        path = urlparse(self.path).path
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(raw)))
         self.send_header("Content-Security-Policy", "default-src 'self' 'unsafe-inline' 'unsafe-eval' https:; img-src 'self' data: https:;")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
+        # Cache policy: fingerprinted assets can be cached forever so browsers
+        # pick up new bundles after an update; everything else (HTML shell and
+        # API responses) must revalidate or users keep a stale UI after upgrade.
+        if path.startswith("/assets/") or path.startswith("/static/assets/"):
+            self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        else:
+            self.send_header("Cache-Control", "no-cache")
         if extra_headers:
             for k, v in extra_headers.items():
                 self.send_header(k, v)
