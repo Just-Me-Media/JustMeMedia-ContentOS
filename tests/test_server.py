@@ -99,8 +99,11 @@ class TestDatabase(unittest.TestCase):
                 with db() as conn:
                     cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
                     tables = [r[0] for r in cur.fetchall()]
-                    for t in ["content_items", "content_versions", "sources", "claims"]:
+                    for t in ["drafts", "draft_versions", "sources", "approvals", "github_repos"]:
                         self.assertIn(t, tables, f"Table {t} missing from schema")
+                    # Dead scaffold tables removed — must not be recreated.
+                    for t in ["content_items", "content_versions", "claims"]:
+                        self.assertNotIn(t, tables, f"Dead table {t} still present")
             finally:
                 s.DB_PATH = orig
 
@@ -295,6 +298,13 @@ class TestPhasesAtoE(unittest.TestCase):
         self.assertIn("heading", slides[0])
         self.assertIn("body", slides[0])
 
+    def test_format_as_carousel_custom_handle(self):
+        from app.server import format_as_carousel
+        slides = format_as_carousel("Deck", "Intro.\n\nPoint one.", handle="acme")
+        cta = slides[-1]["body"]
+        self.assertIn("@acme", cta)
+        self.assertNotIn("@JustMeMedia", cta)
+
     def test_draw_things_unavailable(self):
         # Always mock draw_things_available so the test never opens a socket.
         # The raw call outside a mock was the source of the CI hang.
@@ -448,6 +458,25 @@ class TestPhasesAtoE(unittest.TestCase):
         self.assertNotIn("**", cleaned)
         self.assertNotIn("###", cleaned)
         self.assertIn("https://developer.apple.com/news/", cleaned)
+
+    def test_x_weighted_length_counts_urls_as_23(self):
+        """X counts a URL as 23 chars and emoji as 2 — not naive len()."""
+        from app.server import x_weighted_len, x_effective_len
+        url = "https://example.com/a/very/long/path/that/is/longer/than/twenty-three/characters"
+        self.assertEqual(x_weighted_len(url), 23)
+        self.assertEqual(x_weighted_len("hi 🚀"), 5)  # 'h','i',' '=3 + emoji=2
+        self.assertEqual(x_weighted_len("a🚀"), 3)    # 1 + 2
+        self.assertEqual(x_weighted_len("abc"), 3)
+        self.assertGreaterEqual(x_effective_len(url), len(url))
+
+    def test_format_for_x_with_long_url_respects_280(self):
+        """A long URL must not cause the formatted post to exceed 280 weighted chars."""
+        from app.server import format_for_x, x_effective_len
+        long_url = "https://example.com/" + ("verylongsegment/" * 12) + "final"
+        text = ("We are announcing a major update to our platform today. " * 8) + long_url + " #AI #Tech"
+        out = format_for_x(text, 280)
+        self.assertLessEqual(x_effective_len(out), 280)
+        self.assertIn("https://example.com/", out)
 
     def test_format_as_thread_strict_limit(self):
         from app.server import format_as_thread
