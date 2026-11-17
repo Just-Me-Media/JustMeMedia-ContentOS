@@ -60,7 +60,7 @@ ALLOWED_HOSTNAMES = frozenset({"127.0.0.1", "localhost", "::1"})
 MAX_BODY_BYTES = 2_000_000
 
 # Application version (bump for releases)
-CONTENTOS_VERSION = "1.0.0"
+CONTENTOS_VERSION = "1.0.1"
 GITHUB_REPO = "Just-Me-Media/JustMeMedia-ContentOS"
 
 _ENV_KEY_FALLBACK = frozenset({
@@ -324,6 +324,11 @@ def connect_db() -> sqlite3.Connection:
             UNIQUE(url, fetched_at)
         )
     """)
+    # Migration: mark snapshots that came from the offline sample list so a
+    # generated post can warn the operator instead of presenting fake stars.
+    gcur = conn.execute("PRAGMA table_info(github_repos)")
+    if "sample" not in [row["name"] for row in gcur.fetchall()]:
+        conn.execute("ALTER TABLE github_repos ADD COLUMN sample INTEGER NOT NULL DEFAULT 0")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_github_fetched ON github_repos(fetched_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_github_stars ON github_repos(stars)")
 
@@ -2648,8 +2653,8 @@ def store_github_repos(repos: list[dict], category: str = "General") -> int:
     with db() as conn:
         for r in repos:
             cur = conn.execute(
-                "INSERT OR IGNORE INTO github_repos(full_name, url, description, stars, language, fetched_at, category) VALUES(?,?,?,?,?,?,?)",
-                (r["full_name"], r["url"], r["description"][:500], r["stars"], r["language"], stamp, category)
+                "INSERT OR IGNORE INTO github_repos(full_name, url, description, stars, language, fetched_at, category, sample) VALUES(?,?,?,?,?,?,?,?)",
+                (r["full_name"], r["url"], r["description"][:500], r["stars"], r["language"], stamp, category, 1 if r.get("sample") else 0)
             )
             if cur.rowcount:
                 stored += 1
@@ -2707,7 +2712,8 @@ def generate_weekly_github_bundle(category: str = "General", platform: str = "Li
         "body": body,
         "platform": platform,
         "image_prompt": img_prompt,
-        "repos": repos
+        "repos": repos,
+        "sample": any(bool(r.get("sample")) for r in repos),
     }
 
 
@@ -3073,7 +3079,8 @@ class Handler(BaseHTTPRequestHandler):
                 days = int(query.get("days", ["7"])[0])
                 try:
                     repos = fetch_github_trending("all", lang, days)
-                    self.send_json({"ok": True, "repos": repos, "count": len(repos)})
+                    sample = any(bool(r.get("sample")) for r in repos)
+                    self.send_json({"ok": True, "repos": repos, "count": len(repos), "sample": sample})
                 except Exception as exc:
                     self.send_error_json(500, str(exc))
                 return
@@ -3085,7 +3092,8 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     repos = fetch_github_trending("all", lang, days)
                     stored = store_github_repos(repos, category)
-                    self.send_json({"ok": True, "fetched": len(repos), "stored": stored})
+                    sample = any(bool(r.get("sample")) for r in repos)
+                    self.send_json({"ok": True, "fetched": len(repos), "stored": stored, "sample": sample})
                 except Exception as exc:
                     self.send_error_json(500, str(exc))
                 return

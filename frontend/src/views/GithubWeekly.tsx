@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { api } from '../lib/api';
 import { useToast } from '../components/Toast';
-import { Github, Sparkles, Loader2, ExternalLink, Download, RefreshCw, Star, ArrowRight } from 'lucide-react';
+import { Github, Sparkles, Loader2, ExternalLink, Download, RefreshCw, Star, ArrowRight, AlertTriangle } from 'lucide-react';
 
 interface Repo {
   full_name: string;
@@ -10,6 +10,7 @@ interface Repo {
   stars: number;
   language: string;
   fetched_at?: string;
+  sample?: boolean;
 }
 
 export default function GithubWeekly() {
@@ -19,6 +20,7 @@ export default function GithubWeekly() {
   const [fetching, setFetching] = useState(false);
   const [repos, setRepos] = useState<Repo[]>([]);
   const [bundle, setBundle] = useState<{ title: string; body: string } | null>(null);
+  const [usingSample, setUsingSample] = useState(false);
   const { toast } = useToast();
 
   const fetchTrending = async () => {
@@ -28,7 +30,12 @@ export default function GithubWeekly() {
       const res = await api.getGithubTrending(lang);
       if (res.ok && res.repos) {
         setRepos(res.repos);
-        toast(`Fetched top ${res.repos.length} trending repos!`, 'success');
+        setUsingSample(Boolean(res.sample));
+        if (res.sample) {
+          toast('GitHub API unavailable — showing sample data. Do not publish these numbers.', 'error');
+        } else {
+          toast(`Fetched top ${res.repos.length} live trending repos!`, 'success');
+        }
       } else {
         toast('Failed to fetch trending repos', 'error');
       }
@@ -40,12 +47,21 @@ export default function GithubWeekly() {
   };
 
   const generate = async () => {
+    if (usingSample) {
+      toast('Cannot generate a post from sample data — fetch live repos first.', 'error');
+      return;
+    }
     setLoading(true);
     try {
       const data = await api.generateGithubWeekly('General', platform);
+      setUsingSample(Boolean(data.sample));
       if (data.ok && data.title) {
         setBundle({ title: data.title, body: data.body || '' });
-        toast('Weekly Top 10 post generated!', 'success');
+        if (data.sample) {
+          toast('Generated from sample data — review star counts before publishing!', 'error');
+        } else {
+          toast('Weekly Top 10 post generated!', 'success');
+        }
       } else {
         toast(data.error || 'Nothing cached — run a fetch first', 'error');
       }
@@ -70,6 +86,22 @@ export default function GithubWeekly() {
             <p className="text-[13px] text-sub">Fetch trending repos, view findings immediately, and generate your weekly summary post.</p>
           </div>
         </div>
+
+        {/* Sample-data warning: never let fabricated star counts be published unnoticed */}
+        {usingSample && (
+          <div className="card p-4 mb-6 border-amber-300 bg-amber-50">
+            <div className="flex items-start gap-3">
+              <AlertTriangle size={18} className="text-amber-600 flex-shrink-0 mt-0.5" />
+              <div>
+                <div className="text-[13px] font-bold text-amber-800">Sample data — GitHub API unavailable</div>
+                <p className="text-[12px] text-amber-700 mt-1">
+                  These repositories and star counts are illustrative placeholders, not live data.
+                  Check your network connection and fetch again before publishing a post.
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Controls */}
         <div className="card p-5 mb-6">

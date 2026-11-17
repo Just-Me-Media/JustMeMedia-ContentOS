@@ -113,13 +113,13 @@ export const api = {
       body: JSON.stringify({ version_id }),
     }),
 
-  getGithubTrending: (lang: string) => request<{ ok: boolean; repos: Array<{ full_name: string; url: string; description: string; stars: number; language: string }>; count: number }>(`/api/github/trending?language=${encodeURIComponent(lang)}`),
+  getGithubTrending: (lang: string) => request<{ ok: boolean; repos: Array<{ full_name: string; url: string; description: string; stars: number; language: string; sample?: boolean }>; count: number; sample?: boolean }>(`/api/github/trending?language=${encodeURIComponent(lang)}`),
   githubFetch: (lang: string, category: string, days: number) =>
-    request<{ ok: boolean; fetched: number; stored: number }>(`/api/github/fetch?language=${encodeURIComponent(lang)}&category=${encodeURIComponent(category)}&days=${days}`),
+    request<{ ok: boolean; fetched: number; stored: number; sample?: boolean }>(`/api/github/fetch?language=${encodeURIComponent(lang)}&category=${encodeURIComponent(category)}&days=${days}`),
   githubTop10: (category: string, platform: string) =>
-    request<{ ok: boolean; title?: string; body?: string; image_prompt?: string; error?: string }>(`/api/github/top10?category=${encodeURIComponent(category)}&platform=${encodeURIComponent(platform)}`),
+    request<{ ok: boolean; title?: string; body?: string; image_prompt?: string; sample?: boolean; error?: string }>(`/api/github/top10?category=${encodeURIComponent(category)}&platform=${encodeURIComponent(platform)}`),
   generateGithubWeekly: (category: string, platform: string) =>
-    request<{ ok: boolean; title?: string; body?: string; image_prompt?: string; error?: string }>('/api/github/weekly', { method: 'POST', body: JSON.stringify({ category, platform }) }),
+    request<{ ok: boolean; title?: string; body?: string; image_prompt?: string; sample?: boolean; error?: string }>('/api/github/weekly', { method: 'POST', body: JSON.stringify({ category, platform }) }),
   githubRepos: (category: string, limit: number = 10) =>
     request<{ ok: boolean; repos: Array<{ full_name: string; url: string; description: string; stars: number; language: string; fetched_at: string }>; count: number }>(`/api/github/repos?category=${encodeURIComponent(category)}&limit=${limit}`),
 
