@@ -1,6 +1,8 @@
 # JustMeMedia ContentOS — Complete User Manual
 **Local-First Content Engine & Multimodal Publishing Studio**
 
+*Built by Just Me Media. All drafts and data stay on your own machine.*
+
 ---
 
 ## Table of Contents

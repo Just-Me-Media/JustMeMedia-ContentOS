@@ -34,6 +34,7 @@ export default function Sidebar() {
               </div>
               {!collapsed && (
                 <div className="leading-tight whitespace-nowrap">
+                  <div className="text-[9px] font-bold uppercase tracking-[0.18em] text-brand-600">Just Me Media</div>
                   <div className="font-bold text-[16px] tracking-tight text-ink">Content<span className="text-brand-500">OS</span></div>
                 </div>
               )}
@@ -84,7 +85,7 @@ export default function Sidebar() {
               </div>
               {!collapsed && (
                 <div className="min-w-0">
-                  <div className="text-[13px] font-semibold text-ink truncate">JustMeMedia</div>
+                  <div className="text-[13px] font-semibold text-ink truncate">Just Me Media</div>
                   <div className="text-[11px] text-faint">Free Plan</div>
                 </div>
               )}

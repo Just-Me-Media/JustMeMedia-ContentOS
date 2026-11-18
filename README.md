@@ -1,5 +1,7 @@
 # JustMeMedia ContentOS
 
+> Built by **Just Me Media** — local-first content operations for independent creators and media teams.
+
 **Status:** Production-ready local-first content operations system  
 **Purpose:** A portable, provider-independent content research, drafting, and publishing hub.
 
@@ -163,6 +165,16 @@ Enable loading with:
 ```bash
 export CONTENTOS_LOAD_KEYS=1
 ```
+
+## macOS Desktop App (double-click to launch)
+
+Build a `ContentOS.app` for your Desktop with:
+
+```bash
+bash scripts/make_macos_app.sh
+```
+
+Double-clicking it starts the local server in the background (via a LaunchAgent, so it survives) and opens the UI in a clean Chrome app window — no Terminal, no tabs. Logs go to `~/Library/Logs/ContentOS/`.
 
 ## Tests
 
