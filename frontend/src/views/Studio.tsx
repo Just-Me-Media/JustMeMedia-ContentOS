@@ -6,7 +6,7 @@ import { escapeHtml, htmlToPlainText, plainTextToHtml, sanitizeHtml } from '../l
 import {
   Wand2, Loader2, Save, Eye, Sparkles, Image, AlignLeft, LayoutGrid,
   Bold, Italic, Underline, Link, Minus, List, Trash2, CheckCircle2, Palette, Eraser,
-  MessageSquare, Send, Globe, Undo2,
+  MessageSquare, Send, Globe, Undo2, AlertCircle,
 } from 'lucide-react';
 
 type ChatSource = { title: string; url: string; snippet: string };
@@ -63,6 +63,11 @@ export default function Studio({ embedded = false }: { embedded?: boolean }) {
   const [imagePromptFlash, setImagePromptFlash] = useState(false);
   const imagePromptRef = useRef<HTMLTextAreaElement | null>(null);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
+
+  // Independent fact verification
+  const [sourceUrl, setSourceUrl] = useState('');
+  const [verification, setVerification] = useState<import('../lib/types').VerificationReport | null>(null);
+  const [verifying, setVerifying] = useState(false);
 
   const { toast } = useToast();
 
@@ -156,6 +161,8 @@ export default function Studio({ embedded = false }: { embedded?: boolean }) {
       setPlatform(location.state.platform || 'LinkedIn');
       setImagePrompt(location.state.image_prompt || '');
       setMediaUrl(location.state.media_url || '');
+      if (location.state.source_url) setSourceUrl(location.state.source_url);
+      if (location.state.verification) setVerification(location.state.verification);
     }
     if (location.state?.editId) {
       const id = location.state.editId;
@@ -300,6 +307,37 @@ export default function Studio({ embedded = false }: { embedded?: boolean }) {
     { label: 'Find data & sources', prompt: 'Find credible, recent data and sources I could use to strengthen this post.' },
     { label: 'Image prompts', prompt: 'Suggest 3 strong, concrete image prompts that match the story and brand style.' },
   ];
+
+  const runVerify = async () => {
+    if (!title.trim()) { toast('Add a headline first', 'error'); return; }
+    if (!sourceUrl.trim()) { toast('Add the source URL below to verify its claims', 'error'); return; }
+    setVerifying(true);
+    try {
+      const res = await api.verifyFacts({
+        url: sourceUrl.trim(), title, snippet: '', provider,
+      });
+      if (!res.ok && !res.facts?.length) {
+        toast(res.error || 'Verification could not complete', 'error');
+        setVerification({ ok: false, checked: 0, facts: [], corrected: [], error: res.error || 'Verification failed', verified_at: '' });
+        return;
+      }
+      setVerification({
+        ok: res.ok,
+        checked: res.claims?.length || res.facts?.length || 0,
+        facts: res.facts || [],
+        corrected: res.corrected || [],
+        error: res.error || '',
+        verified_at: new Date().toISOString(),
+      });
+      const corrections = res.corrected?.length || 0;
+      if (corrections > 0) toast(`${corrections} source claim(s) corrected — review below`, 'error');
+      else toast('All checkable claims confirmed by independent sources', 'success');
+    } catch (e: any) {
+      toast(e.message || 'Verification failed', 'error');
+    } finally {
+      setVerifying(false);
+    }
+  };
 
   const generate = async () => {
     if (!title.trim()) { toast('Add a headline first', 'error'); return; }
@@ -661,6 +699,59 @@ export default function Studio({ embedded = false }: { embedded?: boolean }) {
                   className="rounded-md border border-edge bg-surface px-2 py-1 text-[11px] text-ink placeholder-faint focus:outline-none focus:border-brand-500 w-40"
                 />
               </div>
+            </div>
+
+            <div className="card p-4 my-6">
+              <div className="text-[11px] font-bold uppercase tracking-widest text-faint mb-3">
+                Deep Fact Verification
+              </div>
+              <p className="text-[12px] text-sub mb-3 leading-relaxed">
+                Cross-check this story's claims against independent web sources. Corrections are
+                applied to the draft and reviewed here before you approve.
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  value={sourceUrl}
+                  onChange={(e) => setSourceUrl(e.target.value)}
+                  placeholder="https://source-article-url…"
+                  className="flex-1 min-w-[220px] rounded-lg border border-edge bg-surface px-3 py-2 text-[12px] text-ink placeholder-faint focus:outline-none focus:border-brand-500"
+                />
+                <button
+                  onClick={runVerify}
+                  disabled={verifying}
+                  className="flex items-center gap-1.5 rounded-lg border border-brand-300 bg-brand-50 text-brand-700 px-3 py-2 text-[12px] font-semibold hover:bg-brand-100 disabled:opacity-50"
+                >
+                  {verifying ? <Loader2 size={14} className="animate-spin" /> : <Globe size={14} />}
+                  Verify Facts
+                </button>
+              </div>
+              {verification && (
+                <div className="mt-4 pt-4 border-t border-edge space-y-2">
+                  <div className="text-[12px] font-bold text-ink">
+                    {verification.checked} claims checked · {verification.corrected.length} corrected
+                    {verification.error && <span className="text-amber-600 font-normal"> · {verification.error}</span>}
+                  </div>
+                  {verification.corrected.map((f, i) => (
+                    <div key={i} className="rounded-lg bg-amber-50 border border-amber-200 p-3 text-[12px]">
+                      <div className="text-amber-800"><span className="font-bold">Source said:</span> {f.claim}</div>
+                      <div className="text-emerald-700 mt-1"><span className="font-bold">Verified:</span> {f.corrected || f.note}</div>
+                      {f.evidence && <a href={f.evidence} target="_blank" rel="noopener noreferrer" className="text-brand-600 hover:underline text-[11px] mt-1 block truncate">{f.evidence}</a>}
+                    </div>
+                  ))}
+                  {verification.facts.filter(f => f.verdict === 'confirmed').map((f, i) => (
+                    <div key={i} className="rounded-lg bg-raised p-2.5 text-[11px] text-sub flex items-start gap-2">
+                      <CheckCircle2 size={13} className="text-emerald-600 flex-shrink-0 mt-0.5" />
+                      <span><span className="font-semibold text-ink">Verified:</span> {f.claim}</span>
+                    </div>
+                  ))}
+                  {verification.facts.filter(f => f.verdict === 'unverifiable').map((f, i) => (
+                    <div key={i} className="rounded-lg bg-raised p-2.5 text-[11px] text-sub flex items-start gap-2">
+                      <AlertCircle size={13} className="text-amber-600 flex-shrink-0 mt-0.5" />
+                      <span><span className="font-semibold text-ink">Unverifiable (omitted):</span> {f.claim}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             <div className="card p-4 my-6">

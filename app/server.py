@@ -60,7 +60,7 @@ ALLOWED_HOSTNAMES = frozenset({"127.0.0.1", "localhost", "::1"})
 MAX_BODY_BYTES = 2_000_000
 
 # Application version (bump for releases)
-CONTENTOS_VERSION = "1.0.2"
+CONTENTOS_VERSION = "1.0.3"
 GITHUB_REPO = "Just-Me-Media/JustMeMedia-ContentOS"
 
 _ENV_KEY_FALLBACK = frozenset({
@@ -208,6 +208,8 @@ def connect_db() -> sqlite3.Connection:
         conn.execute("ALTER TABLE drafts ADD COLUMN tags TEXT NOT NULL DEFAULT ''")
     if "body_html" not in cols:
         conn.execute("ALTER TABLE drafts ADD COLUMN body_html TEXT NOT NULL DEFAULT ''")
+    if "verification_report" not in cols:
+        conn.execute("ALTER TABLE drafts ADD COLUMN verification_report TEXT NOT NULL DEFAULT ''")
 
     # 3. Sources table (Research intake & provenance)
     conn.execute("""
@@ -1337,6 +1339,200 @@ def deep_research_story(url: str, title: str, snippet: str = "") -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# DEEP VERIFICATION — cross-check source claims against independent web sources
+# ─────────────────────────────────────────────────────────────────────────────
+
+_EXTRACT_SYSTEM = """You are a meticulous research librarian extracting checkable factual claims.
+Return ONLY claims in this exact format, one per block, up to {n}:
+---CLAIM---
+<one short, specific factual claim from the article, including any number/date/version/name>
+---END CLAIM---
+Rules: only claims actually stated in the text; no opinions, no invented numbers; if a fact looks dubious still extract it so it can be checked."""
+
+_ADJUDICATE_SYSTEM = """You are a strict fact-checker. You are given claims from a source article and search results from INDEPENDENT sources. The source article may contain mistakes.
+For each claim decide a verdict using ONLY the evidence provided:
+- "confirmed" — independent sources agree with the claim.
+- "corrected" — the claim is wrong; write the accurate version in the corrected field.
+- "unverifiable" — evidence is insufficient; do not guess.
+Return ONLY verdict blocks, one per claim, in this exact format:
+---FACT---
+claim: <the original claim>
+verdict: confirmed|corrected|unverifiable
+corrected: <accurate version if corrected, otherwise empty>
+evidence: <the single most relevant URL from the evidence, otherwise empty>
+note: <one short sentence explaining the verdict>
+---END FACT---
+Never invent URLs or numbers. Do not output anything except the blocks."""
+
+
+def _parse_claims(raw: str, limit: int = 6) -> list[str]:
+    """Extract ---CLAIM--- blocks from a model response."""
+    claims: list[str] = []
+    for match in re.finditer(
+        r"---CLAIM---(.*?)(?:---END CLAIM---|$)", raw or "", re.DOTALL | re.IGNORECASE
+    ):
+        text = re.sub(r"\s+", " ", match.group(1)).strip().strip('"')
+        if len(text) >= 8 and text not in claims:
+            claims.append(text)
+        if len(claims) >= limit:
+            break
+    return claims
+
+
+def _parse_facts(raw: str) -> list[dict]:
+    """Extract ---FACT--- verdict blocks from a model response."""
+    facts: list[dict] = []
+    for match in re.finditer(
+        r"---FACT---(.*?)(?:---END FACT---|$)", raw or "", re.DOTALL | re.IGNORECASE
+    ):
+        block = match.group(1)
+        fields = {"claim": "", "verdict": "unverifiable", "corrected": "", "evidence": "", "note": ""}
+        for line in block.splitlines():
+            if ":" in line:
+                key, _, value = line.partition(":")
+                key = key.strip().lower()
+                if key in fields:
+                    fields[key] = value.strip()
+        if fields["claim"]:
+            facts.append(fields)
+    return facts
+
+
+def verify_claims(provider_id: str, title: str, source_text: str,
+                  source_url: str = "") -> dict:
+    """Cross-check the source article's factual claims against independent sources.
+
+    Pipeline: extract checkable claims -> web search each claim -> adjudicate with
+    an independent model pass -> return a corrected-facts block plus a structured
+    report. Never mutates the source; returns structured data the caller feeds to
+    the drafter and the human.
+
+    Returns: {"ok": bool, "claims": [...], "facts": [...], "corrected": [...],
+              "verified_block": str, "error": str}
+    """
+    result = {"ok": False, "claims": [], "facts": [], "corrected": [],
+              "verified_block": "", "error": ""}
+    try:
+        if not source_text or len(source_text) < 40:
+            result["error"] = "No source text to verify."
+            return result
+
+        # Step 1: extract the checkable claims from the source.
+        extract_prompt = (
+            f"Article title: {title}\n\nArticle text:\n{source_text[:6000]}\n"
+        )
+        claims_raw = call_ai(provider_id, extract_prompt, _EXTRACT_SYSTEM.format(n=6))
+        claims = _parse_claims(claims_raw)
+        result["claims"] = claims
+        if not claims:
+            result["error"] = "No checkable claims were extracted from the source."
+            return result
+
+        # Step 2: independently search each claim. Keep the strongest evidence.
+        evidence_lines: list[str] = []
+        for claim in claims[:6]:
+            try:
+                hits = web_research(claim, limit=3)
+            except Exception:
+                hits = []
+            if hits:
+                evidence_lines.append(f"CLAIM: {claim}")
+                for hit in hits[:3]:
+                    snippet = re.sub(r"\s+", " ", hit.get("snippet", ""))[:300]
+                    evidence_lines.append(
+                        f"  SOURCE: {hit.get('title', '')}\n"
+                        f"  URL: {hit.get('url', '')}\n"
+                        f"  TEXT: {snippet}"
+                    )
+                evidence_lines.append("")
+            else:
+                evidence_lines.append(f"CLAIM: {claim}\n  (no independent results found)\n")
+
+        if not evidence_lines:
+            result["error"] = "Web research returned no evidence."
+            return result
+
+        # Step 3: adjudicate claims against independent evidence only.
+        adjudicate_prompt = (
+            f"Source article title: {title}\n"
+            f"Source article URL: {source_url}\n\n"
+            f"Claims and independent evidence:\n" + "\n".join(evidence_lines) + "\n"
+        )
+        facts_raw = call_ai(provider_id, adjudicate_prompt, _ADJUDICATE_SYSTEM)
+        facts = _parse_facts(facts_raw)
+
+        # A small local model may not emit a verdict for every claim. Any claim
+        # without a verdict MUST be marked unverifiable (never silently dropped
+        # into the draft). Strict 1:1 best-match stops one vague verdict from
+        # "covering" several different claims.
+        def _tokens(text: str) -> set:
+            return set(re.findall(r"[a-z0-9]+", (text or "").lower()))
+
+        # Map each model fact to at most one claim (its best, strongest match).
+        fact_for_claim: dict[int, int] = {}
+        claimed_facts: set = set()
+        for i, claim in enumerate(claims[:6]):
+            ct = _tokens(claim)
+            best_j, best_score = -1, 0.0
+            for j, f in enumerate(facts):
+                if j in claimed_facts:
+                    continue
+                score = len(_tokens(f.get("claim", "")) & ct) / max(len(ct), 1) if ct else 0.0
+                if score > best_score:
+                    best_j, best_score = j, score
+            if best_j >= 0 and best_score >= 0.7:
+                fact_for_claim[i] = best_j
+                claimed_facts.add(best_j)
+        # Any claim with no matched fact gets an explicit unverifiable verdict.
+        for i, claim in enumerate(claims[:6]):
+            if i not in fact_for_claim:
+                facts.append({
+                    "claim": claim,
+                    "verdict": "unverifiable",
+                    "corrected": "",
+                    "evidence": "",
+                    "note": "No independent verdict was produced; omitted from the post.",
+                })
+        result["facts"] = facts
+        if not facts:
+            result["error"] = "No verdicts were produced by the fact-checker."
+            return result
+
+        corrected = [f for f in facts if f.get("verdict", "").lower() == "corrected"]
+        result["corrected"] = corrected
+
+        # Step 4: build the block that overrides the source in the drafting context.
+        lines = [
+            "=== INDEPENDENT FACT VERIFICATION (authoritative — the source article may contain errors) ===",
+            "Use the VERIFIED/CORRECTED facts below. Ignore the source article wherever it conflicts.",
+            "Do not include any claim marked unverifiable. Do not invent facts not listed here.",
+        ]
+        for f in facts:
+            verdict = f.get("verdict", "unverifiable").lower()
+            if verdict == "corrected":
+                lines.append(f"- SOURCE CLAIM (WRONG): {f['claim']}")
+                lines.append(f"  USE INSTEAD: {f.get('corrected') or f['claim']}")
+            elif verdict == "confirmed":
+                lines.append(f"- VERIFIED: {f['claim']}")
+            else:
+                lines.append(f"- UNVERIFIABLE (omit from post): {f['claim']}")
+            if f.get("evidence"):
+                lines.append(f"  EVIDENCE: {f['evidence']}")
+            if f.get("note"):
+                lines.append(f"  NOTE: {f['note']}")
+        if corrected:
+            lines.append(
+                f"WARNING: {len(corrected)} source claim(s) were wrong and have been corrected above."
+            )
+        result["verified_block"] = "\n".join(lines)
+        result["ok"] = True
+        return result
+    except Exception as exc:
+        result["error"] = str(exc)
+        return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # STUDIO AI ASSISTANT — chat, web research, rewrites and image prompts
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1795,8 +1991,21 @@ def run_chat(provider_id: str, message: str, title: str = "", body: str = "",
     return parsed
 
 
-def run_roundtable(provider_id: str, title: str, context: str, platform: str, tone: str = "thought_leadership", source_url: str = "") -> dict:
-    """3-Agent Consensus Pipeline: Drafter -> Fact-Checker -> Hook/Format Optimizer -> Art Director."""
+def run_roundtable(provider_id: str, title: str, context: str, platform: str, tone: str = "thought_leadership", source_url: str = "", verified_block: str = "") -> dict:
+    """3-Agent Consensus Pipeline: Drafter -> Fact-Checker -> Hook/Format Optimizer -> Art Director.
+
+    ``verified_block`` holds independently-verified/corrected facts. When present
+    it is prepended to every agent's context and marked authoritative so a
+    mistaken source article cannot propagate into the draft.
+    """
+    # Independent verification overrides the raw source text. Put it first and
+    # last so it wins over the (possibly wrong) source article.
+    if verified_block:
+        context = (
+            verified_block
+            + "\n\n=== ORIGINAL SOURCE TEXT (may contain the errors listed above) ===\n"
+            + context
+        )
     tone_directives = {
         "thought_leadership": "Style: Authoritative, strategic, data-informed industry insights. Highlight future implications.",
         "viral_story": "Style: Compelling narrative hook, strong pattern interrupt, punchy 1-line pacing, relatable takeaway.",
@@ -1843,7 +2052,9 @@ def run_roundtable(provider_id: str, title: str, context: str, platform: str, to
     # Agent 2: Fact-Checker & Anti-Hype Guard
     checker_sys = (
         "You are Agent 2 (The Fact-Checker & Anti-Hype Guard) for JustMeMedia. "
-        "Your job is to verify claims against the provided source facts. "
+        "Your job is to verify claims against the INDEPENDENT VERIFIED FACTS supplied above, "
+        "which override the original source article. If the source article contains an error "
+        "that was corrected, you MUST use the corrected version. "
         "Strip out all overclaiming hyperbole ('doors swung wide open', 'reshapes app discovery', 'game-changer', 'delve', 'unleash', 'testament'). "
         "Ensure version numbers, beta labels, and publisher attributions are accurate. No fake customer stories or invented metrics."
     )
@@ -3586,6 +3797,22 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True, "dossier": res["dossier"], "links": res["links"]})
                 return
 
+            # Deep Verification Endpoint — cross-check a story's claims against
+            # independent web sources and return corrections. AI is optional.
+            if path == "/api/verify":
+                url = string_field(payload, "url")
+                title = string_field(payload, "title")
+                snippet = string_field(payload, "snippet")
+                provider = string_field(payload, "provider") or "auto"
+                source_text = extract_article_text(url) if url else ""
+                if (not source_text or source_text.startswith("(")) and snippet:
+                    source_text = snippet
+                if not source_text:
+                    source_text = title
+                verification = verify_claims(provider, title, source_text, url)
+                self.send_json(verification)
+                return
+
             # Open media folder / reveal file in Finder
             if path == "/api/open-media":
                 filename = string_field(payload, "filename")
@@ -3643,17 +3870,35 @@ class Handler(BaseHTTPRequestHandler):
                 
                 # Agent 0: Deep Investigator
                 use_deep = payload.get("deep_research", True)
+                verified_block = ""
+                verification_report = {}
                 if use_deep and url:
                     try:
                         research = deep_research_story(url, title, snippet)
                         context = research["dossier"]
                     except Exception:
                         context = extract_article_text(url) or (snippet or title)
+                    # Agent 0b: independent cross-verification. Corrected facts
+                    # override the source article so its mistakes don't propagate.
+                    try:
+                        verification = verify_claims(provider, title, context, url)
+                        if verification["ok"] and verification["verified_block"]:
+                            verified_block = verification["verified_block"]
+                        verification_report = {
+                            "ok": verification["ok"],
+                            "checked": len(verification["claims"]),
+                            "corrected": verification["corrected"],
+                            "facts": verification["facts"],
+                            "error": verification["error"],
+                            "verified_at": now_iso(),
+                        }
+                    except Exception as exc:
+                        verification_report = {"ok": False, "error": str(exc)}
                 else:
                     deep_text = extract_article_text(url) if url else ""
                     context = deep_text if deep_text and not deep_text.startswith("(") else (snippet or title)
-                
-                res = run_roundtable(provider, title, context, platform, tone=tone, source_url=url)
+
+                res = run_roundtable(provider, title, context, platform, tone=tone, source_url=url, verified_block=verified_block)
                 
                 media_url = ""
                 if draw_things_available() or os.environ.get("OPENAI_API_KEY") or os.environ.get("STABILITY_API_KEY") or os.environ.get("REPLICATE_API_TOKEN"):
@@ -3705,9 +3950,10 @@ class Handler(BaseHTTPRequestHandler):
                         }, 200)
                         return
                     cur = conn.execute(
-                        """INSERT INTO drafts(title, body, platform, status, image_prompt, source_url, media_url, scheduled_for, created_at, updated_at)
-                           VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                        (title[:200], res["final_post"], platform[:40], "Draft", res["image_prompt"], url, media_url, scheduled_for, stamp, stamp)
+                        """INSERT INTO drafts(title, body, platform, status, image_prompt, source_url, media_url, scheduled_for, verification_report, created_at, updated_at)
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                        (title[:200], res["final_post"], platform[:40], "Draft", res["image_prompt"], url, media_url, scheduled_for,
+                         json.dumps(verification_report) if verification_report else "", stamp, stamp)
                     )
                     draft_id = cur.lastrowid
                 self.send_json({
@@ -3718,6 +3964,7 @@ class Handler(BaseHTTPRequestHandler):
                     "image_prompt": res["image_prompt"],
                     "media_url": media_url,
                     "scheduled_for": scheduled_for,
+                    "verification": verification_report,
                     "platform": platform,
                     "status": "Draft"
                 }, 201)

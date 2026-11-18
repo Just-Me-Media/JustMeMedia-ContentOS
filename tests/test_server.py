@@ -965,5 +965,133 @@ class TestResearchHelpers(unittest.TestCase):
             s._bing_rss_search, s._bing_search, s._ddg_search, s._wiki_search = original
 
 
+class TestDeepVerification(unittest.TestCase):
+    """Independent cross-checking of source claims against web evidence."""
+
+    def test_parse_claims(self):
+        from app.server import _parse_claims
+        raw = (
+            "Intro\n---CLAIM---\nThe model has 120B parameters\n---END CLAIM---\n"
+            "---CLAIM---\nReleased in March 2026\n---END CLAIM---\n"
+            "---CLAIM---\nshort\n---END CLAIM---"
+        )
+        claims = _parse_claims(raw)
+        self.assertEqual(claims, ["The model has 120B parameters", "Released in March 2026"])
+
+    def test_parse_facts(self):
+        from app.server import _parse_facts
+        raw = (
+            "---FACT---\nclaim: The model has 120B params\nverdict: corrected\n"
+            "corrected: The model has 20B params\nevidence: https://example.com/p\n"
+            "note: Official spec says 20B\n---END FACT---\n"
+            "---FACT---\nclaim: It is open source\nverdict: confirmed\n"
+            "corrected:\nevidence: https://example.com/o\nnote: Confirmed\n---END FACT---"
+        )
+        facts = _parse_facts(raw)
+        self.assertEqual(len(facts), 2)
+        self.assertEqual(facts[0]["verdict"], "corrected")
+        self.assertEqual(facts[0]["corrected"], "The model has 20B params")
+        self.assertEqual(facts[1]["verdict"], "confirmed")
+
+    def test_verify_claims_full_pipeline(self):
+        """Claims are extracted, searched independently, and corrected facts win."""
+        import app.server as srv
+        source = (
+            "A new model launched. It has 120B parameters and was released in "
+            "March 2026. It is available on all platforms today for free."
+        )
+        claims_raw = (
+            "---CLAIM---\nThe model has 120B parameters\n---END CLAIM---\n"
+            "---CLAIM---\nIt was released in March 2026\n---END CLAIM---"
+        )
+        facts_raw = (
+            "---FACT---\nclaim: The model has 120B parameters\nverdict: corrected\n"
+            "corrected: The model has 20B parameters\nevidence: https://vendor.example/spec\n"
+            "note: Vendor spec lists 20B\n---END FACT---\n"
+            "---FACT---\nclaim: It was released in March 2026\nverdict: confirmed\n"
+            "corrected:\nevidence: https://news.example/release\nnote: Matches\n---END FACT---"
+        )
+        calls = []
+        def fake_call(provider, prompt, system=""):
+            calls.append(system)
+            return claims_raw if len(calls) == 1 else facts_raw
+        orig_call, orig_research = srv.call_ai, srv.web_research
+        try:
+            srv.call_ai = fake_call
+            srv.web_research = lambda q, limit=5: [
+                {"title": "vendor spec", "url": "https://vendor.example/spec", "snippet": "20B params"},
+                {"title": "release", "url": "https://news.example/release", "snippet": "March 2026"},
+            ]
+            res = srv.verify_claims("test:model", "New model", source, "https://source.example")
+        finally:
+            srv.call_ai, srv.web_research = orig_call, orig_research
+        self.assertTrue(res["ok"])
+        self.assertEqual(len(res["claims"]), 2)
+        self.assertEqual(len(res["corrected"]), 1)
+        self.assertIn("USE INSTEAD: The model has 20B parameters", res["verified_block"])
+        self.assertIn("WARNING: 1 source claim(s) were wrong", res["verified_block"])
+        self.assertIn("INDEPENDENT FACT VERIFICATION", res["verified_block"])
+        self.assertIn("may contain errors", res["verified_block"])
+        self.assertIn("strict fact-checker", calls[1])
+
+    def test_verify_claims_no_source(self):
+        from app.server import verify_claims
+        res = verify_claims("test:model", "Title", "")
+        self.assertFalse(res["ok"])
+        self.assertIn("No source text", res["error"])
+
+    def test_unverified_claims_are_not_silently_dropped(self):
+        """Small models that skip verdicts still get explicit unverifiable facts."""
+        import app.server as srv
+        source = "Apple launched a phone. It has 120B params and costs $99 today."
+        claims_raw = (
+            "---CLAIM---\nIt has 120B params\n---END CLAIM---\n"
+            "---CLAIM---\nIt costs $99\n---END CLAIM---"
+        )
+        # Model only emits a verdict for the first claim.
+        facts_raw = (
+            "---FACT---\nclaim: It has 120B params\nverdict: corrected\n"
+            "corrected: It has 20B params\nevidence:\nnote: spec\n---END FACT---"
+        )
+        calls = []
+        def fake_call(provider, prompt, system=""):
+            calls.append(system)
+            return claims_raw if len(calls) == 1 else facts_raw
+        orig_call, orig_research = srv.call_ai, srv.web_research
+        try:
+            srv.call_ai = fake_call
+            srv.web_research = lambda q, limit=5: []
+            res = srv.verify_claims("test:m", "Phone", source)
+        finally:
+            srv.call_ai, srv.web_research = orig_call, orig_research
+        self.assertTrue(res["ok"])
+        self.assertEqual(len(res["facts"]), 2)
+        unverifiable = [f for f in res["facts"] if f["verdict"] == "unverifiable"]
+        self.assertEqual(len(unverifiable), 1)
+        self.assertIn("costs $99", unverifiable[0]["claim"])
+        self.assertIn("UNVERIFIABLE (omit from post)", res["verified_block"])
+
+    def test_roundtable_uses_verified_block(self):
+        """A verified block is prepended to the drafter's context."""
+        import app.server as srv
+        seen = []
+        def fake_call(provider, prompt, system=""):
+            seen.append(prompt)
+            return "draft" if len(seen) == 1 else "ok"
+        orig = srv.call_ai
+        orig_sleep = srv.time.sleep
+        try:
+            srv.call_ai = fake_call
+            srv.time.sleep = lambda s: None
+            srv.run_roundtable("test:m", "Title", "original source text",
+                               "LinkedIn", verified_block="=== VERIFIED ===\nUSE 20B not 120B")
+        finally:
+            srv.call_ai = orig
+            srv.time.sleep = orig_sleep
+        self.assertTrue(seen)
+        self.assertIn("=== VERIFIED ===", seen[0])
+        self.assertIn("USE 20B not 120B", seen[0])
+
+
 if __name__ == "__main__":
     unittest.main()
