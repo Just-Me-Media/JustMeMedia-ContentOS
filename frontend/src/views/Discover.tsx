@@ -90,16 +90,24 @@ export default function Discover() {
         provider: 'ollama:llama3.2:3b',
       });
       if (res.ok) {
-        toast(res.dedup ? `Existing draft loaded (no duplicate created)` : `Draft created for ${platform}!`, res.dedup ? 'info' : 'success');
+        const corrections = res.verification?.corrected?.length || 0;
+        if (corrections > 0) {
+          toast(`${corrections} source claim(s) were corrected by independent fact-checking`, 'error');
+        } else {
+          toast(res.dedup ? `Existing draft loaded (no duplicate created)` : `Draft created for ${platform}!`, res.dedup ? 'info' : 'success');
+        }
         setStories((prev) => prev.filter((s) => s.url !== story.url));
-        // Auto-forward to Studio with the draft data (existing or new)
-        setTimeout(() => navigate('/', {
+        // Auto-forward to Studio with the draft data and verification report
+        setTimeout(() => navigate('/studio', {
           state: {
             title: res.title || story.title,
             body: res.body || '',
             platform: res.platform || platform,
             image_prompt: res.image_prompt || '',
             media_url: res.media_url || '',
+            source_url: story.url,
+            snippet: story.snippet,
+            verification: res.verification,
           }
         }), 1500);
       } else {

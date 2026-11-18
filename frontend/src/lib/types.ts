@@ -16,6 +16,24 @@ export interface Draft {
   created_at?: string;
   updated_at?: string;
   live_url?: string;
+  verification_report?: string;
+}
+
+export interface VerifiedFact {
+  claim: string;
+  verdict: string;
+  corrected: string;
+  evidence: string;
+  note: string;
+}
+
+export interface VerificationReport {
+  ok: boolean;
+  checked: number;
+  facts: VerifiedFact[];
+  corrected: VerifiedFact[];
+  error: string;
+  verified_at: string;
 }
 
 export interface SourceItem {

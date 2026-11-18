@@ -59,8 +59,8 @@ export const api = {
   generatePost: (data: { title: string; platform: string; tone: string; provider: string; url?: string; deep_research?: boolean; roundtable?: boolean; auto_image?: boolean }) =>
     request<{ ok: boolean; result?: string; final_post?: string; image_prompt?: string; media_url?: string; error?: string }>('/api/generate', { method: 'POST', body: JSON.stringify(data) }),
 
-  oneClickDraft: (data: { title: string; url: string; snippet: string; platform: string; tone: string; provider: string }) =>
-    request<{ ok: boolean; title?: string; body?: string; platform?: string; image_prompt?: string; media_url?: string; scheduled_for?: string; dedup?: boolean; error?: string }>('/api/one-click-draft', { method: 'POST', body: JSON.stringify(data) }),
+  oneClickDraft: (data: { title: string; url: string; snippet: string; platform: string; tone: string; provider: string; deep_research?: boolean }) =>
+    request<{ ok: boolean; title?: string; body?: string; platform?: string; image_prompt?: string; media_url?: string; scheduled_for?: string; dedup?: boolean; verification?: import('./types').VerificationReport; error?: string }>('/api/one-click-draft', { method: 'POST', body: JSON.stringify(data) }),
 
   formatThread: (text: string) => request<{ ok: boolean; tweets: string[]; count: number }>('/api/format-thread', { method: 'POST', body: JSON.stringify({ text }) }),
   formatCarousel: (title: string, text: string) => request<{ ok: boolean; slides: Array<{ slide: number; title?: string; heading?: string; body: string }>; count: number }>('/api/format-carousel', { method: 'POST', body: JSON.stringify({ title, text }) }),
@@ -126,6 +126,17 @@ export const api = {
   // Deep research on a story
   deepResearch: (url: string, title: string, snippet: string) =>
     request<{ ok: boolean; dossier: string; links: string[] }>('/api/deep-research', { method: 'POST', body: JSON.stringify({ url, title, snippet }) }),
+
+  // Independent fact verification — cross-check source claims against the web
+  verifyFacts: (data: { url: string; title: string; snippet: string; provider: string }) =>
+    request<{
+      ok: boolean;
+      claims: string[];
+      facts: Array<{ claim: string; verdict: string; corrected: string; evidence: string; note: string }>;
+      corrected: Array<{ claim: string; verdict: string; corrected: string; evidence: string; note: string }>;
+      verified_block: string;
+      error: string;
+    }>('/api/verify', { method: 'POST', body: JSON.stringify(data) }),
 
   // Read article text
   readArticle: (url: string) => request<{ url: string; text: string }>(`/api/read-article?url=${encodeURIComponent(url)}`),

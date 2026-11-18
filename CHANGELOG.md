@@ -5,6 +5,16 @@ All notable changes to JustMeMedia ContentOS will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.3] - 2026-11-17
+
+### Added
+- **Deep fact verification:** source articles are no longer trusted blindly. When drafting from a URL, checkable claims are extracted, searched against independent web sources, and adjudicated. Confirmed / corrected / unverifiable verdicts are fed to the drafter and fact-checker as authoritative, so mistakes in the source are overridden rather than repeated.
+- A visible "Deep Fact Verification" panel in Content Studio shows every claim, its verdict, the corrected version, and the evidence URL. Includes a "Verify Facts" button for on-demand checks and a `/api/verify` endpoint.
+- Verification reports are stored with each draft (migrated `verification_report` column) and surfaced as a warning toast when corrections are found.
+
+### Fixed
+- Discover now navigates to Content Studio (was going to the Dashboard, dropping the draft state).
+
 ## [1.0.2] - 2026-11-17
 
 ### Fixed
